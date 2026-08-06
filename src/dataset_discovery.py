@@ -53,15 +53,20 @@ def image_files(directory: Path) -> list[Path]:
 
 def _score(directory: Path, role: str) -> int:
     name = directory.name.lower().replace("-", "").replace("_", "")
-    ancestors = " ".join(p.name.lower() for p in directory.parents)
+    ancestor_names = {
+        part.name.lower().replace("-", "").replace("_", "")
+        for part in list(directory.parents)[:3]
+    }
+    is_test_split = bool(ancestor_names & {"test", "testing", "testnoisylr"})
+    is_train_split = "train" in ancestor_names
     score = len(image_files(directory))
     if role == "target" and any(x in name for x in ("gt", "groundtruth", "target", "clean", "hr")):
         score += 1_000_000
     if role == "input" and any(x in name for x in ("noisylr", "degraded", "input", "lr")):
         score += 1_000_000
-    if role == "test" and "test" in ancestors and any(x in name for x in ("noisylr", "degraded", "input", "lr")):
+    if role == "test" and is_test_split and any(x in name for x in ("noisylr", "degraded", "input", "lr")):
         score += 2_000_000
-    if role != "test" and "train" in ancestors:
+    if role != "test" and is_train_split:
         score += 500_000
     return score
 
