@@ -1,0 +1,6 @@
+numpy
+pillow
+imageio
+tifffile
+matplotlib
+pytest
