@@ -26,9 +26,52 @@ python -m pip install -r requirements.txt
 
 `requirements.txt` contains the exact dependency versions used for verification, including pytest for this small repository's development and test workflow.
 
+## Quick Start with Docker
+
+Install Docker Desktop (Windows/macOS) or Docker Engine (Linux). Python and the project dependencies do not need to be installed on the host.
+
+Build the image from the repository root:
+
+```bash
+docker build -t semicon-restoration .
+```
+
+Run the portable unit tests (the image's default command):
+
+```bash
+docker run --rm semicon-restoration
+```
+
+The dataset is not included in Git or in the Docker image. Download and extract it separately under the repository's `data/` directory using the structure in [Dataset Setup](#dataset-setup), then mount it read-only when running dataset inspection. Mount `results/` as well to persist generated reports on the host.
+
+### Windows PowerShell
+
+```powershell
+docker run --rm `
+  -v "${PWD}/data:/app/data:ro" `
+  -v "${PWD}/results:/app/results" `
+  semicon-restoration `
+  python inspect_dataset.py --data-dir /app/data --results-dir /app/results --max-samples 100
+```
+
+### macOS/Linux
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$(pwd)/data:/app/data:ro" \
+  -v "$(pwd)/results:/app/results" \
+  semicon-restoration \
+  python inspect_dataset.py --data-dir /app/data --results-dir /app/results --max-samples 100
+```
+
+The macOS/Linux command uses your host user ID so reports created in the bind-mounted `results/` directory remain editable by your account. Docker Desktop handles bind-mount permissions for the PowerShell command.
+
+Commands after the image name override the default, so other utilities work the same way. For example, `python visualize_samples.py --data-dir /app/data` runs sample visualization. The existing `SEMICON_DATA_DIR` override is also supported; set it with Docker's `-e` option when mounting the dataset somewhere other than `/app/data`.
+
 ## Dataset Setup
 
-The full hackathon dataset is not required for development or unit testing. To use it for inspection or integration testing, download and extract it without changing its internal structure so it appears under:
+The full hackathon dataset is not committed to Git and is not required for development or unit testing. Download it separately and extract it without changing its internal structure so it appears under:
 
 ```text
 data/Data-public/train/train/NoisyLR/
