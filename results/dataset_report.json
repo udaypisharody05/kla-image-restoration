@@ -1,21 +1,20 @@
 {
-  "generated_at_utc": "2026-08-06T17:16:07.867402+00:00",
+  "generated_at_utc": "2026-08-07T16:26:10.640505+00:00",
   "dataset_root": "data/Data-public",
-  "requested_data_dir": "data",
+  "requested_data_dir": "data/Data-public",
   "folder_hierarchy": [
-    "Data-public/",
-    "Data-public/Test_NoisyLR/",
-    "Data-public/Test_NoisyLR/__MACOSX/",
-    "Data-public/Test_NoisyLR/__MACOSX/NoisyLR/",
-    "Data-public/Test_NoisyLR/NoisyLR/",
-    "Data-public/train/",
-    "Data-public/train/__MACOSX/",
-    "Data-public/train/__MACOSX/train/",
-    "Data-public/train/__MACOSX/train/GT/",
-    "Data-public/train/__MACOSX/train/NoisyLR/",
-    "Data-public/train/train/",
-    "Data-public/train/train/GT/",
-    "Data-public/train/train/NoisyLR/"
+    "Test_NoisyLR/",
+    "Test_NoisyLR/NoisyLR/",
+    "Test_NoisyLR/__MACOSX/",
+    "Test_NoisyLR/__MACOSX/NoisyLR/",
+    "train/",
+    "train/__MACOSX/",
+    "train/__MACOSX/train/",
+    "train/__MACOSX/train/GT/",
+    "train/__MACOSX/train/NoisyLR/",
+    "train/train/",
+    "train/train/GT/",
+    "train/train/NoisyLR/"
   ],
   "total_physical_files": 13606,
   "file_counts_by_extension": {
@@ -42,31 +41,31 @@
     "duplicate_input_ids": {},
     "duplicate_target_ids": {}
   },
-  "inspection_limit_per_group": 0,
+  "inspection_limit_per_group": 100,
   "input": {
     "file_count": 3200,
-    "inspected_file_count": 3200,
+    "inspected_file_count": 100,
     "shapes": {
-      "[128, 128]": 3200
+      "[128, 128]": 100
     },
     "dtypes": {
-      "float32": 3200
+      "float32": 100
     },
     "channels": {
-      "1": 3200
+      "1": 100
     },
     "all_grayscale": true,
-    "minimum": -0.2785630524158478,
-    "maximum": 2.1580049991607666,
-    "mean": 0.43353628821395707,
-    "standard_deviation": 0.2847866113127247,
-    "value_count": 52428800,
-    "below_zero_count": 149367,
-    "below_zero_percent": 0.2848949432373047,
-    "above_one_count": 1629724,
-    "above_one_percent": 3.1084518432617188,
-    "outside_0_1_count": 1779091,
-    "outside_0_1_percent": 3.3933467864990234,
+    "minimum": -0.13109295070171356,
+    "maximum": 1.8896383047103882,
+    "mean": 0.41740439894874226,
+    "standard_deviation": 0.29574788028779153,
+    "value_count": 1638400,
+    "below_zero_count": 9537,
+    "below_zero_percent": 0.58209228515625,
+    "above_one_count": 55503,
+    "above_one_percent": 3.38763427734375,
+    "outside_0_1_count": 65040,
+    "outside_0_1_percent": 3.9697265625,
     "nan_count": 0,
     "infinite_count": 0,
     "constant_or_nearly_constant_files": [],
@@ -75,22 +74,22 @@
   },
   "ground_truth": {
     "file_count": 3200,
-    "inspected_file_count": 3200,
+    "inspected_file_count": 100,
     "shapes": {
-      "[256, 256]": 3200
+      "[256, 256]": 100
     },
     "dtypes": {
-      "float32": 3200
+      "float32": 100
     },
     "channels": {
-      "1": 3200
+      "1": 100
     },
     "all_grayscale": true,
     "minimum": 0.0,
     "maximum": 1.0,
-    "mean": 0.4335284413612528,
-    "standard_deviation": 0.2726460604341478,
-    "value_count": 209715200,
+    "mean": 0.4174877994539575,
+    "standard_deviation": 0.2843056914876901,
+    "value_count": 6553600,
     "below_zero_count": 0,
     "below_zero_percent": 0.0,
     "above_one_count": 0,
@@ -105,28 +104,28 @@
   },
   "test_input": {
     "file_count": 400,
-    "inspected_file_count": 400,
+    "inspected_file_count": 100,
     "shapes": {
-      "[128, 128]": 400
+      "[128, 128]": 100
     },
     "dtypes": {
-      "float32": 400
+      "float32": 100
     },
     "channels": {
-      "1": 400
+      "1": 100
     },
     "all_grayscale": true,
-    "minimum": -0.2248806655406952,
+    "minimum": -0.15555042028427124,
     "maximum": 2.1580159664154053,
-    "mean": 0.44274202802813156,
-    "standard_deviation": 0.2842690490176536,
-    "value_count": 6553600,
-    "below_zero_count": 43262,
-    "below_zero_percent": 0.660125732421875,
-    "above_one_count": 201860,
-    "above_one_percent": 3.08013916015625,
-    "outside_0_1_count": 245122,
-    "outside_0_1_percent": 3.740264892578125,
+    "mean": 0.44734266816697693,
+    "standard_deviation": 0.28382670257582604,
+    "value_count": 1638400,
+    "below_zero_count": 8257,
+    "below_zero_percent": 0.50396728515625,
+    "above_one_count": 50883,
+    "above_one_percent": 3.10565185546875,
+    "outside_0_1_count": 59140,
+    "outside_0_1_percent": 3.609619140625,
     "nan_count": 0,
     "infinite_count": 0,
     "constant_or_nearly_constant_files": [],
@@ -134,7 +133,7 @@
     "range_validation": "degraded values may be outside [0,1]"
   },
   "scale_factors": {
-    "2x2": 3200
+    "2x2": 100
   },
   "scale_factor_consistent": true,
   "invalid_dimension_pair_ids": [],

@@ -1,0 +1,20 @@
+{
+  "generated_at_utc": "2026-08-07T17:03:01.569035+00:00",
+  "method": "Pillow float32 bicubic",
+  "scale": 2,
+  "seed": 42,
+  "validation_fraction": 0.2,
+  "train_samples": 2560,
+  "validation_samples": 640,
+  "evaluated_samples": 640,
+  "clip_prediction_for_metrics": true,
+  "metric_data_range": 1.0,
+  "psnr_db": 23.141256390027987,
+  "ssim": 0.5506037498842895,
+  "lpips": null,
+  "lpips_status": "not requested",
+  "total_interpolation_seconds": 0.6050073000042175,
+  "mean_interpolation_ms": 0.9453239062565899,
+  "interpolation_images_per_second": 1057.8384756606054,
+  "timing_scope": "bicubic interpolation only; excludes loading and metrics"
+}

@@ -14,7 +14,7 @@ RUN groupadd --gid 10001 app \
     && mkdir -p /app/data /app/results \
     && chown -R app:app /app
 
-COPY --chown=app:app inspect_dataset.py visualize_samples.py pytest.ini ./
+COPY --chown=app:app inspect_dataset.py visualize_samples.py evaluate_baseline.py pytest.ini ./
 COPY --chown=app:app src/ ./src/
 COPY --chown=app:app tests/ ./tests/
 

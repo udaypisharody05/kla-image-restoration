@@ -1,6 +1,6 @@
 # Dataset inspection report
 
-Generated: 2026-08-06T17:16:07.867402+00:00
+Generated: 2026-08-07T16:26:10.640505+00:00
 
 ## Layout
 
@@ -25,21 +25,21 @@ Generated: 2026-08-06T17:16:07.867402+00:00
 
 ### Training degraded
 
-Inspected 3200 of 3200 files.
+Inspected 100 of 3200 files.
 
-- Shapes: `{'[128, 128]': 3200}`; dtypes: `{'float32': 3200}`; channels: `{'1': 3200}`; grayscale: True
-- Min/max: -0.278563052 / 2.158005; mean/std: 0.433536288 / 0.284786611
-- Below 0: 149367 (0.284895%); above 1: 1629724 (3.108452%)
-- Outside [0,1]: 1779091 (3.393347%)
+- Shapes: `{'[128, 128]': 100}`; dtypes: `{'float32': 100}`; channels: `{'1': 100}`; grayscale: True
+- Min/max: -0.131092951 / 1.8896383; mean/std: 0.417404399 / 0.29574788
+- Below 0: 9537 (0.582092%); above 1: 55503 (3.387634%)
+- Outside [0,1]: 65040 (3.969727%)
 - NaN/Inf: 0 / 0
 - Constant/nearly constant: 0; load failures: 0
 
 ### Ground truth
 
-Inspected 3200 of 3200 files.
+Inspected 100 of 3200 files.
 
-- Shapes: `{'[256, 256]': 3200}`; dtypes: `{'float32': 3200}`; channels: `{'1': 3200}`; grayscale: True
-- Min/max: 0 / 1; mean/std: 0.433528441 / 0.27264606
+- Shapes: `{'[256, 256]': 100}`; dtypes: `{'float32': 100}`; channels: `{'1': 100}`; grayscale: True
+- Min/max: 0 / 1; mean/std: 0.417487799 / 0.284305691
 - Below 0: 0 (0.000000%); above 1: 0 (0.000000%)
 - Outside [0,1]: 0 (0.000000%)
 - NaN/Inf: 0 / 0
@@ -47,18 +47,18 @@ Inspected 3200 of 3200 files.
 
 ### Test degraded
 
-Inspected 400 of 400 files.
+Inspected 100 of 400 files.
 
-- Shapes: `{'[128, 128]': 400}`; dtypes: `{'float32': 400}`; channels: `{'1': 400}`; grayscale: True
-- Min/max: -0.224880666 / 2.15801597; mean/std: 0.442742028 / 0.284269049
-- Below 0: 43262 (0.660126%); above 1: 201860 (3.080139%)
-- Outside [0,1]: 245122 (3.740265%)
+- Shapes: `{'[128, 128]': 100}`; dtypes: `{'float32': 100}`; channels: `{'1': 100}`; grayscale: True
+- Min/max: -0.15555042 / 2.15801597; mean/std: 0.447342668 / 0.283826703
+- Below 0: 8257 (0.503967%); above 1: 50883 (3.105652%)
+- Outside [0,1]: 59140 (3.609619%)
 - NaN/Inf: 0 / 0
 - Constant/nearly constant: 0; load failures: 0
 
 ## Geometry
 
-- Scale factors: `{'2x2': 3200}`
+- Scale factors: `{'2x2': 100}`
 - Consistent: True
 
 ## Warnings

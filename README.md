@@ -115,3 +115,92 @@ pytest
 ```
 
 If the full dataset is absent or its structure is invalid, integration tests report a clear skip reason while unit tests continue to run and pass.
+
+## Bicubic Validation Baseline
+
+The first reproducible reference is a classical 2x bicubic interpolation baseline. It uses the existing deterministic NoisyLR-to-GT pairing and splits the pairs into 80% training and 20% validation with seed `42` by default. Only the validation subset is evaluated; the competition test set has no GT and is not used.
+
+```bash
+python evaluate_baseline.py \
+  --data-dir data/Data-public \
+  --val-fraction 0.2 \
+  --seed 42
+```
+
+The command reports PSNR (dB), grayscale SSIM, interpolation-only CPU timing, and throughput, and saves `results/bicubic_baseline.json`. The raw float32 bicubic result is retained unchanged. By default, only the prediction passed to metrics is clipped to `[0,1]`, because GT represents valid intensities in that range; use `--no-clip-prediction` to measure without metric-time clipping.
+
+LPIPS is available through `--lpips` only when a compatible optional PyTorch/LPIPS installation and its pretrained weights are already available. The grayscale metric input is replicated to three channels and mapped from `[0,1]` to `[-1,1]` inside the LPIPS adapter only. The default dependency set intentionally excludes this large, download-dependent stack; if unavailable, the baseline completes and records LPIPS as unavailable rather than failing.
+
+This baseline establishes the performance that future learned restoration models should beat.
+
+## PyTorch Data Pipeline
+
+The lazy PyTorch datasets reuse the repository's canonical discovery and seeded split. They store paths and metadata only; arrays are loaded when a sample is indexed.
+
+```python
+from pathlib import Path
+
+from src.dataset import PairedRestorationDataset, create_dataloader
+from src.dataset_discovery import discover_layout, discover_pairs
+from src.splits import split_pairs
+
+layout = discover_layout(Path("data"))
+pairs = discover_pairs(layout).pairs
+train_pairs, validation_pairs = split_pairs(
+    pairs,
+    val_fraction=0.2,
+    seed=42,
+)
+
+train_dataset = PairedRestorationDataset(train_pairs)
+validation_dataset = PairedRestorationDataset(validation_pairs)
+
+train_loader = create_dataloader(
+    train_dataset,
+    batch_size=8,
+    shuffle=True,
+    seed=42,
+)
+validation_loader = create_dataloader(
+    validation_dataset,
+    batch_size=8,
+    shuffle=False,
+)
+```
+
+Each paired sample contains `input`, `target`, and `filename`. Input tensors are raw NoisyLR `torch.float32` values in `[1,H,W]` format, including legitimate values below 0 or above 1. GT tensors are `torch.float32 [1,2H,2W]`. No clipping, normalization, resizing, cropping, padding, or augmentation occurs.
+
+For competition inputs without GT, construct `RestorationTestDataset(image_files(layout.test_input_dir))`; samples contain only `input` and `filename`. `create_dataloader` supports `batch_size`, `shuffle`, `num_workers`, `pin_memory`, `drop_last`, and an optional shuffle `seed`.
+
+## Training Preprocessing
+
+Training uses a spatially aligned random crop followed by paired geometric augmentation:
+
+```text
+128x128 LR  -> random 64x64 LR crop at (y, x)
+256x256 GT  -> corresponding 128x128 GT crop at (2y, 2x)
+             -> identical paired flips/right-angle rotation
+```
+
+```python
+from src.transforms import create_training_transform
+
+training_transform = create_training_transform(
+    crop_size=64,
+    scale=2,
+    augment=True,
+)
+training_dataset = PairedRestorationDataset(
+    train_pairs,
+    scale=2,
+    transform=training_transform,
+)
+
+# Validation stays deterministic and directly comparable with the full-image
+# bicubic baseline: no crop and no augmentation.
+validation_dataset = PairedRestorationDataset(validation_pairs, scale=2)
+```
+
+The default augmentation policy independently applies horizontal and vertical flips with probability 0.5 and uniformly selects a rotation from 0, 90, 180, or 270 degrees. No interpolation is used. There are no intensity changes, clipping, normalization, resizing, padding, or quantization; raw float32 NoisyLR values are preserved.
+
+By default transforms use PyTorch's process-local RNG, which DataLoader workers seed in the standard way. Pass `seed=` or a `torch.Generator` to `create_training_transform` for deterministic single-worker tests or runs. Generator state advances on every access, so a sample is not permanently assigned one crop. Validation should continue using `transform=None` and complete `128x128`/`256x256` images so neural metrics remain comparable with the bicubic PSNR and SSIM baseline.
