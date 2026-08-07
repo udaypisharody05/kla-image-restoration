@@ -2,6 +2,30 @@
 
 Utilities for inspecting and validating the paired image-restoration dataset.
 
+## Installation
+
+The project is tested with **Python 3.12.13**. Other Python versions have not been verified.
+
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+On macOS or Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+`requirements.txt` contains the exact dependency versions used for verification, including pytest for this small repository's development and test workflow.
+
 ## Dataset Setup
 
 The full hackathon dataset is not required for development or unit testing. To use it for inspection or integration testing, download and extract it without changing its internal structure so it appears under:
