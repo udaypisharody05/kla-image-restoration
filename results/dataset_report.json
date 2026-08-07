@@ -1,7 +1,7 @@
 {
   "generated_at_utc": "2026-08-06T17:16:07.867402+00:00",
-  "dataset_root": "C:\\Projects\\kla-image-restoration\\data\\Data-public",
-  "requested_data_dir": "C:\\Projects\\kla-image-restoration\\data",
+  "dataset_root": "data/Data-public",
+  "requested_data_dir": "data",
   "folder_hierarchy": [
     "Data-public/",
     "Data-public/Test_NoisyLR/",
@@ -25,9 +25,9 @@
   },
   "approximate_extracted_size_bytes": 1076780216,
   "directories": {
-    "train_input": "C:\\Projects\\kla-image-restoration\\data\\Data-public\\train\\train\\NoisyLR",
-    "ground_truth": "C:\\Projects\\kla-image-restoration\\data\\Data-public\\train\\train\\GT",
-    "test_input": "C:\\Projects\\kla-image-restoration\\data\\Data-public\\Test_NoisyLR\\NoisyLR"
+    "train_input": "train/train/NoisyLR",
+    "ground_truth": "train/train/GT",
+    "test_input": "Test_NoisyLR/NoisyLR"
   },
   "counts": {
     "training_inputs": 3200,

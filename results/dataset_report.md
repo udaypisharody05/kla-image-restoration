@@ -4,10 +4,10 @@ Generated: 2026-08-06T17:16:07.867402+00:00
 
 ## Layout
 
-- Dataset root: `C:\Projects\kla-image-restoration\data\Data-public`
-- Training inputs: `C:\Projects\kla-image-restoration\data\Data-public\train\train\NoisyLR`
-- Ground truths: `C:\Projects\kla-image-restoration\data\Data-public\train\train\GT`
-- Test inputs: `C:\Projects\kla-image-restoration\data\Data-public\Test_NoisyLR\NoisyLR`
+- Dataset root: `data/Data-public`
+- Training inputs: `train/train/NoisyLR`
+- Ground truths: `train/train/GT`
+- Test inputs: `Test_NoisyLR/NoisyLR`
 - Physical files: 13606
 - Extracted size: 1026.90 MiB
 
