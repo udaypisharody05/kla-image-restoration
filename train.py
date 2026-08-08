@@ -24,6 +24,7 @@ from torch import nn
 from inspect_dataset import configured_data_dir
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import discover_layout, discover_pairs
+from src.losses import build_loss, build_loss_config, loss_label
 from src.metrics import psnr, ssim
 from src.models import ResidualSRNet
 from src.splits import split_pairs
@@ -121,6 +122,7 @@ def save_checkpoint(
     training_config: dict,
     scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None = None,
     scheduler_config: dict | None = None,
+    loss_config: dict | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -133,6 +135,10 @@ def save_checkpoint(
             "training_config": training_config,
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             "scheduler_config": scheduler_config,
+            # Every run has some reconstruction loss; a caller that doesn't pass
+            # one explicitly gets the same default all historical checkpoints
+            # implicitly used.
+            "loss_config": loss_config if loss_config is not None else {"name": "l1"},
         },
         path,
     )
@@ -145,6 +151,7 @@ def load_checkpoint_for_resume(
     model_config: dict,
     device: torch.device,
     scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None = None,
+    loss_config: dict | None = None,
 ) -> tuple[int, float, dict]:
     """Restore model/optimizer/(optional) scheduler state from *path*.
 
@@ -152,6 +159,11 @@ def load_checkpoint_for_resume(
     Older checkpoints saved before scheduler support existed simply lack the
     ``scheduler_state_dict``/``scheduler_config`` keys; ``.get()`` treats that
     the same as an explicit ``None`` rather than raising.
+
+    *loss_config*, when given, must match the checkpoint's stored loss config
+    exactly (mirroring the strict ``model_config`` check below) -- a resume
+    must never silently switch the reconstruction loss a run is being trained
+    against. Pass ``None`` to skip this check (used by tests that don't care).
     """
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     if checkpoint["model_config"] != model_config:
@@ -160,6 +172,17 @@ def load_checkpoint_for_resume(
             f"the requested model_config {model_config}; pass matching "
             "--num-features/--num-blocks/--scale to resume."
         )
+    if loss_config is not None:
+        # Checkpoints saved before loss selection existed have no stored
+        # loss_config; every historical run used plain L1, so that is the
+        # only sensible default to compare against.
+        checkpoint_loss_config = checkpoint.get("loss_config", {"name": "l1"})
+        if checkpoint_loss_config != loss_config:
+            raise ValueError(
+                f"Checkpoint loss_config {checkpoint_loss_config} does not match "
+                f"the requested loss_config {loss_config}; pass matching "
+                "--loss/--charbonnier-eps to resume."
+            )
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
@@ -221,8 +244,9 @@ def validate(
         inputs = batch["input"].to(device)
         targets = batch["target"].to(device)
         outputs = model(inputs)
-        # L1 is left unclamped -- it reports the raw model error. PSNR/SSIM clip
-        # the prediction to [0,1] by default (see src/metrics.py), matching the
+        # The reconstruction loss (whichever one was selected) is left
+        # unclamped -- it reports the raw model error. PSNR/SSIM clip the
+        # prediction to [0,1] by default (see src/metrics.py), matching the
         # bicubic baseline's convention so the printed numbers stay comparable.
         loss = loss_fn(outputs, targets)
         batch_size = inputs.shape[0]
@@ -231,7 +255,7 @@ def validate(
         total_ssim += ssim(outputs, targets) * batch_size
         total_count += batch_size
     return {
-        "l1": total_loss / total_count,
+        "loss": total_loss / total_count,
         "psnr": total_psnr / total_count,
         "ssim": total_ssim / total_count,
     }
@@ -280,6 +304,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-lr", type=float, default=1e-6, help="Lower bound the scheduler will not cross"
     )
+    parser.add_argument(
+        "--loss",
+        type=str,
+        choices=["l1", "charbonnier"],
+        default="l1",
+        help="Reconstruction loss. 'l1' (default) reproduces Experiments 1-3 exactly.",
+    )
+    parser.add_argument(
+        "--charbonnier-eps",
+        type=float,
+        default=1e-3,
+        help="Charbonnier loss epsilon (ignored unless --loss charbonnier)",
+    )
     return parser.parse_args()
 
 
@@ -326,7 +363,11 @@ def main() -> None:
     }
     model = ResidualSRNet(**model_config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    loss_fn = nn.L1Loss()
+
+    loss_config = build_loss_config(args.loss, args.charbonnier_eps)
+    loss_fn = build_loss(loss_config)
+    label = loss_label(loss_config["name"])
+    print(f"Loss: {loss_config}")
 
     scheduler_config = build_scheduler_config(
         args.scheduler, args.scheduler_factor, args.scheduler_patience, args.min_lr
@@ -349,7 +390,13 @@ def main() -> None:
     best_val_psnr = float("-inf")
     if args.resume is not None:
         start_epoch, best_val_psnr, previous_config = load_checkpoint_for_resume(
-            args.resume, model, optimizer, model_config, device, scheduler=scheduler
+            args.resume,
+            model,
+            optimizer,
+            model_config,
+            device,
+            scheduler=scheduler,
+            loss_config=loss_config,
         )
         print(
             f"Resumed from {args.resume}: continuing at epoch {start_epoch} "
@@ -374,14 +421,14 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         started = time.time()
         epoch_lr = current_lr(optimizer)
-        train_l1 = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
         val_metrics = validate(model, validation_loader, loss_fn, device)
         elapsed = time.time() - started
 
         print(f"Epoch {epoch}")
         print(f"Learning rate: {epoch_lr:.6e}")
-        print(f"Train L1: {train_l1:.6f}")
-        print(f"Val L1: {val_metrics['l1']:.6f}")
+        print(f"Train {label}: {train_loss:.6f}")
+        print(f"Val {label}: {val_metrics['loss']:.6f}")
         print(f"Val PSNR: {val_metrics['psnr']:.4f} dB")
         print(f"Val SSIM: {val_metrics['ssim']:.6f}")
         print(f"Bicubic PSNR: {BICUBIC_PSNR_DB:.4f} dB")
@@ -417,6 +464,7 @@ def main() -> None:
             training_config,
             scheduler=scheduler,
             scheduler_config=scheduler_config,
+            loss_config=loss_config,
         )
         if is_new_best:
             save_checkpoint(
@@ -429,6 +477,7 @@ def main() -> None:
                 training_config,
                 scheduler=scheduler,
                 scheduler_config=scheduler_config,
+                loss_config=loss_config,
             )
             print(f"New best checkpoint saved ({best_path}); Val PSNR={best_val_psnr:.4f} dB")
 

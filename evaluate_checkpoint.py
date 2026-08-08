@@ -4,6 +4,12 @@ Loads a checkpoint saved by ``train.py``, reconstructs the matching
 ``ResidualSRNet``, evaluates the deterministic validation split, and prints
 L1/PSNR/SSIM alongside the established bicubic baseline for comparison. Does
 not run inference on the competition test set.
+
+Regardless of which reconstruction loss a checkpoint was *trained* with (see
+``src/losses.py`` and ``--loss`` in ``train.py``), evaluation always reports
+actual L1 as its "Val L1" diagnostic -- this keeps that number directly
+comparable across every experiment, including ones trained with Charbonnier
+loss. The checkpoint's training loss is reported separately and explicitly.
 """
 
 import argparse
@@ -15,6 +21,7 @@ from torch import nn
 from inspect_dataset import configured_data_dir
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import discover_layout, discover_pairs
+from src.losses import loss_label
 from src.models import ResidualSRNet
 from src.splits import split_pairs
 from train import BICUBIC_PSNR_DB, BICUBIC_SSIM, select_device, validate
@@ -48,6 +55,10 @@ def main() -> None:
         f"Loaded checkpoint {args.checkpoint} (epoch={checkpoint.get('epoch')}, "
         f"best_val_psnr={checkpoint.get('best_val_psnr')})"
     )
+    # Checkpoints saved before loss selection existed have no stored
+    # loss_config; every historical run (Experiments 1-3) used plain L1.
+    loss_config = checkpoint.get("loss_config", {"name": "l1"})
+    print(f"Training loss: {loss_label(loss_config['name'])} ({loss_config})")
 
     pairs = discover_pairs(discover_layout(args.data_dir)).pairs
     _, validation_pairs = split_pairs(pairs, val_fraction=args.val_fraction, seed=args.seed)
@@ -60,10 +71,13 @@ def main() -> None:
         validation_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
 
+    # Always score with real L1 here (independent of loss_config above), so
+    # this number stays directly comparable across every experiment even when
+    # training losses differ.
     metrics = validate(model, validation_loader, nn.L1Loss(), device)
 
     print(f"Validation samples: {len(validation_dataset)}")
-    print(f"Val L1:   {metrics['l1']:.6f}")
+    print(f"Val L1 (diagnostic, always L1 regardless of training loss): {metrics['loss']:.6f}")
     print(f"Val PSNR: {metrics['psnr']:.4f} dB")
     print(f"Val SSIM: {metrics['ssim']:.6f}")
     print(f"Bicubic PSNR: {BICUBIC_PSNR_DB:.4f} dB")

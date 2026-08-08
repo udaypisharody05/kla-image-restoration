@@ -615,8 +615,7 @@ capacity (Experiment 3).
 
 ## Status
 
-**Planned / infrastructure verified.** The real 40-epoch training run has not been
-executed.
+**Completed and independently verified.**
 
 ## Objective
 
@@ -677,7 +676,105 @@ Separate from `checkpoints/exp1_baseline/`, `checkpoints/exp2_plateau/`, and
 
 ## Result
 
-TBD -- the real 40-epoch Experiment 3 run has not been started.
+```text
+Best epoch by PSNR: 38
+
+Val L1:   0.033708
+Val PSNR: 27.6212 dB
+Val SSIM: 0.743619
+```
+
+Checkpoint: `checkpoints/exp3_capacity/checkpoint_best.pt`
+
+## Comparison vs Experiment 2
+
+| Metric | Exp 2 (32/4) | Exp 3 (64/8) | Improvement |
+| ------ | -----------: | -----------: | ----------: |
+| PSNR   |   27.2959 dB |   27.6212 dB | +0.3253 dB  |
+| SSIM   |     0.734007 |     0.743619 | +0.009612   |
+
+## Conclusion
+
+Increasing model capacity (7.45x more parameters) produced a measurable improvement over
+Experiment 2, larger than the scheduler's own contribution (+0.0255 dB) but smaller than
+the gain from longer training alone (+0.1834 dB). Experiment 3 is now the primary
+reference configuration for subsequent experiments. Experiment 3 must remain untouched
+and reproducible; its checkpoints under `checkpoints/exp3_capacity/` are not modified by
+later experiments.
+
+---
+
+# Experiment 4 — Charbonnier Loss
+
+## Status
+
+**Planned / infrastructure verified.** The real 40-epoch training run has not been
+executed.
+
+## Objective
+
+Determine whether Charbonnier reconstruction loss improves validation restoration
+quality compared with L1, using Experiment 3 (64 features, 8 residual blocks, 40 epochs,
+ReduceLROnPlateau) as both the architecture and the training-recipe reference.
+
+## Change From Experiment 3
+
+```text
+Loss: L1Loss -> Charbonnier loss
+      mean(sqrt((prediction - target)^2 + epsilon^2))
+Charbonnier epsilon: 1e-3
+```
+
+Everything else -- architecture (64 features, 8 residual blocks, 630,724 parameters),
+optimizer, initial LR, scheduler config, batch size, epochs, seed, dataset/split, crop
+sizes, augmentation, validation preprocessing, PSNR/SSIM implementation and clipping
+convention, checkpointing/resume semantics -- is unchanged from Experiment 3.
+
+## Implementation
+
+`src/losses.py` adds `CharbonnierLoss` (`nn.Module`) plus `build_loss_config`/
+`build_loss`/`loss_label` helpers, mirroring the existing scheduler helper pattern.
+`train.py` gains `--loss {l1,charbonnier}` (default `l1`, so Experiments 1-3 remain
+exactly reproducible with no flag) and `--charbonnier-eps` (default `1e-3`). Checkpoints
+now also store `loss_config`; resuming with a mismatched `--loss`/`--charbonnier-eps`
+against a checkpoint's stored config raises a clear error rather than silently switching
+objectives, mirroring the existing `model_config` resume-safety check. Checkpoints saved
+before this change (Experiments 1-3) have no `loss_config` key and are treated as L1,
+consistent with what they actually used. Training/validation logging now prints
+`Train L1`/`Val L1` or `Train Charbonnier`/`Val Charbonnier` depending on the selected
+loss, instead of always labeling the value "L1". `evaluate_checkpoint.py` always reports
+an actual-L1 `Val L1` diagnostic regardless of training loss (so that number stays
+comparable across every experiment) and separately prints which loss the checkpoint was
+trained with.
+
+## Checkpoint Directory
+
+```text
+checkpoints/exp4_charbonnier/checkpoint_latest.pt
+checkpoints/exp4_charbonnier/checkpoint_best.pt
+```
+
+Separate from `checkpoints/exp1_baseline/`, `checkpoints/exp2_plateau/`,
+`checkpoints/exp2_fixed40/`, and `checkpoints/exp3_capacity/`, all of which remain
+untouched.
+
+## Success Criterion
+
+Compared directly against Experiment 3 (PSNR = 27.6212 dB, SSIM = 0.743619) using
+validation PSNR as the checkpoint-selection metric, exactly as in every prior experiment:
+
+```text
+Exp 4 PSNR > 27.6212 dB: possible improvement from Charbonnier
+Exp 4 PSNR approximately equal: no meaningful advantage
+Exp 4 PSNR lower: L1 remains preferable under this setup
+```
+
+Loss magnitude (L1 vs Charbonnier values are not on the same numeric scale near zero
+error) is explicitly not the comparison criterion.
+
+## Result
+
+TBD -- the real 40-epoch Experiment 4 run has not been started.
 
 ---
 
@@ -688,8 +785,9 @@ TBD -- the real 40-epoch Experiment 3 run has not been started.
 | Bicubic                  | Classical interpolation               |     23.1413 dB |     0.550604 | Complete |
 | Exp 1 — Residual CNN     | First neural baseline (20 epochs)     |     27.0870 dB |      0.725385 | Complete |
 | Exp 2B — Longer training | 40 epochs, fixed LR                   |     27.2704 dB |      0.731226 | Complete |
-| Exp 2 — Optimization     | 40 epochs, ReduceLROnPlateau          | **27.2959 dB** |  **0.734007** | Complete |
-| Exp 3 — Capacity         | 64 features / 8 blocks (7.45x params) |             TBD |           TBD | Planned  |
+| Exp 2 — Optimization     | 40 epochs, ReduceLROnPlateau          |     27.2959 dB |      0.734007 | Complete |
+| Exp 3 — Capacity         | 64 features / 8 blocks (7.45x params) | **27.6212 dB** |  **0.743619** | Complete |
+| Exp 4 — Charbonnier loss | L1 -> Charbonnier (eps=1e-3)          |             TBD |           TBD | Planned  |
 
 ---
 
