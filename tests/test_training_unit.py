@@ -495,3 +495,150 @@ def test_resume_rejects_l1_request_against_charbonnier_checkpoint(tmp_path: Path
             torch.device("cpu"),
             loss_config={"name": "l1"},
         )
+
+
+# --- Experiment 5: L1+SSIM composite loss checkpointing and resume ---
+
+
+def test_checkpoint_stores_correct_l1_ssim_loss_config(tmp_path: Path) -> None:
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    loss_config = {"name": "l1_ssim", "ssim_weight": 0.1}
+
+    checkpoint_path = tmp_path / "exp5_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=10.0,
+        model_config=model_config,
+        training_config={},
+        loss_config=loss_config,
+    )
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["loss_config"] == {"name": "l1_ssim", "ssim_weight": 0.1}
+
+
+def test_l1_ssim_loss_config_survives_save_and_resume(tmp_path: Path) -> None:
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    loss_config = {"name": "l1_ssim", "ssim_weight": 0.1}
+
+    checkpoint_path = tmp_path / "exp5_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=7,
+        best_val_psnr=22.0,
+        model_config=model_config,
+        training_config={},
+        loss_config=loss_config,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-4)
+    start_epoch, best_val_psnr, _ = load_checkpoint_for_resume(
+        checkpoint_path,
+        resumed_model,
+        resumed_optimizer,
+        model_config,
+        torch.device("cpu"),
+        loss_config=loss_config,
+    )
+    assert start_epoch == 8
+    assert best_val_psnr == 22.0
+
+
+def test_resume_rejects_l1_ssim_request_against_legacy_l1_checkpoint(tmp_path: Path) -> None:
+    """Resuming the real Experiment 3 checkpoint (no loss_config, i.e. L1) as l1_ssim must fail."""
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    legacy_checkpoint_path = tmp_path / "legacy_checkpoint.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": 38,
+            "best_val_psnr": 27.6212,
+            "model_config": model_config,
+            "training_config": {},
+        },
+        legacy_checkpoint_path,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-4)
+    with pytest.raises(ValueError, match="loss_config"):
+        load_checkpoint_for_resume(
+            legacy_checkpoint_path,
+            resumed_model,
+            resumed_optimizer,
+            model_config,
+            torch.device("cpu"),
+            loss_config={"name": "l1_ssim", "ssim_weight": 0.1},
+        )
+
+
+def test_resume_rejects_l1_request_against_l1_ssim_checkpoint(tmp_path: Path) -> None:
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp5_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=5,
+        best_val_psnr=18.0,
+        model_config=model_config,
+        training_config={},
+        loss_config={"name": "l1_ssim", "ssim_weight": 0.1},
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-4)
+    with pytest.raises(ValueError, match="loss_config"):
+        load_checkpoint_for_resume(
+            checkpoint_path,
+            resumed_model,
+            resumed_optimizer,
+            model_config,
+            torch.device("cpu"),
+            loss_config={"name": "l1"},
+        )
+
+
+def test_resume_rejects_charbonnier_request_against_l1_ssim_checkpoint(tmp_path: Path) -> None:
+    """Distinguishing l1_ssim from charbonnier too, not just from l1."""
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp5_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=5,
+        best_val_psnr=18.0,
+        model_config=model_config,
+        training_config={},
+        loss_config={"name": "l1_ssim", "ssim_weight": 0.1},
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-4)
+    with pytest.raises(ValueError, match="loss_config"):
+        load_checkpoint_for_resume(
+            checkpoint_path,
+            resumed_model,
+            resumed_optimizer,
+            model_config,
+            torch.device("cpu"),
+            loss_config={"name": "charbonnier", "epsilon": 1e-3},
+        )

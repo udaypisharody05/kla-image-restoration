@@ -708,8 +708,7 @@ later experiments.
 
 ## Status
 
-**Planned / infrastructure verified.** The real 40-epoch training run has not been
-executed.
+**Completed and independently verified.**
 
 ## Objective
 
@@ -774,7 +773,114 @@ error) is explicitly not the comparison criterion.
 
 ## Result
 
-TBD -- the real 40-epoch Experiment 4 run has not been started.
+```text
+Best epoch by PSNR: 38
+
+Val L1 diagnostic: 0.033817
+Val PSNR: 27.5881 dB
+Val SSIM: 0.743230
+```
+
+Checkpoint: `checkpoints/exp4_charbonnier/checkpoint_best.pt`
+
+## Comparison vs Experiment 3
+
+| Metric | Exp 3 (L1) | Exp 4 (Charbonnier) | Change     |
+| ------ | ---------: | -------------------: | ---------: |
+| PSNR   | 27.6212 dB |            27.5881 dB| -0.0331 dB |
+| SSIM   |   0.743619 |              0.743230 | -0.000389  |
+
+## Conclusion
+
+Charbonnier did not outperform L1 -- both PSNR and SSIM are very slightly lower than
+Experiment 3, essentially a wash within run-to-run noise. **Experiment 3 (L1) remains
+the canonical best configuration.** This is consistent with Charbonnier's numerical
+similarity to L1 away from zero error (see the synthetic sanity check in the Experiment 4
+implementation report): for this model/dataset, smoothing the loss near zero error did
+not translate into a measurable validation improvement.
+
+---
+
+# Experiment 5 — L1 + SSIM Composite Loss
+
+## Status
+
+**Planned / infrastructure verified.** The real 40-epoch training run has not been
+executed.
+
+## Objective
+
+Test whether explicit structural-similarity optimization improves the current best
+64-feature / 8-block model (Experiment 3), by adding a differentiable SSIM term to the
+reconstruction loss.
+
+## Change From Experiment 3
+
+```text
+Loss: L1Loss -> L1 + lambda * (1 - SSIM)
+      lambda (ssim_weight) = 0.1
+```
+
+Everything else -- architecture (64 features, 8 residual blocks, 630,724 parameters),
+optimizer, initial LR, scheduler config, batch size, epochs, seed, dataset/split, crop
+sizes, augmentation, validation preprocessing, PSNR/SSIM implementation and clipping
+convention, checkpointing/resume semantics -- is unchanged from Experiment 3.
+
+## Differentiable SSIM Implementation
+
+`src/losses.py` adds a from-scratch, pure-PyTorch local-window (Gaussian) SSIM
+(`differentiable_ssim`, Wang et al. 2004 formulation) built entirely from `conv2d` +
+elementwise tensor ops -- no NumPy conversion, so gradients flow through it. This is
+deliberately separate from the established `src.metrics.ssim` (which converts to NumPy
+via scikit-image for evaluation and is not differentiable): training uses the new
+differentiable version inside the loss, while validation/evaluation continue to use the
+existing scikit-image-based metric unchanged, so Experiment 5's PSNR/SSIM stay directly
+comparable to Experiments 1-4. The two implementations can produce slightly different
+numeric SSIM values (different window/constant conventions between scikit-image and this
+Gaussian-window formulation) -- expected and not a bug, since only the evaluation metric
+is used for cross-experiment comparison.
+
+Window size 11, Gaussian sigma 1.5, `C1 = (0.01*L)^2`, `C2 = (0.03*L)^2` with data range
+`L = 1.0` -- the standard SSIM constants. `SSIMLoss` wraps it as `1 - differentiable_ssim`;
+`L1SSIMLoss` computes `L1 + ssim_weight * SSIMLoss`.
+
+`build_loss_config`/`build_loss`/`loss_label` (already used for `l1`/`charbonnier`) are
+extended with `"l1_ssim"` rather than adding parallel logic. `train.py` gains
+`--loss l1_ssim` and `--ssim-weight` (default `0.1`); logging prints `Train L1+SSIM`/
+`Val L1+SSIM` for this loss. Checkpoints store
+`loss_config: {"name": "l1_ssim", "ssim_weight": 0.1}`; resume enforces an exact match
+against the checkpoint's stored loss config (mirroring the Experiment 4 safety check),
+so an L1, Charbonnier, or L1+SSIM checkpoint can never be silently resumed under a
+different objective. `evaluate_checkpoint.py` requires no changes -- it already reports
+the checkpoint's training loss generically via `loss_label()` and always scores an
+actual-L1 diagnostic regardless of training loss.
+
+## Checkpoint Directory
+
+```text
+checkpoints/exp5_l1_ssim/checkpoint_latest.pt
+checkpoints/exp5_l1_ssim/checkpoint_best.pt
+```
+
+Separate from `checkpoints/exp1_baseline/`, `checkpoints/exp2_plateau/`,
+`checkpoints/exp2_fixed40/`, `checkpoints/exp3_capacity/`, and
+`checkpoints/exp4_charbonnier/`, all of which remain untouched.
+
+## Success Criterion
+
+Compared directly against Experiment 3 (PSNR = 27.6212 dB, SSIM = 0.743619), interpreted
+using both metrics, with validation PSNR remaining the checkpoint-selection metric:
+
+```text
+Higher PSNR and higher SSIM: clear improvement
+Similar PSNR but noticeably higher SSIM: potential useful tradeoff
+Higher SSIM but meaningfully worse PSNR: do not automatically replace Experiment 3
+Lower on both: reject composite loss
+```
+
+## Result
+
+TBD -- the real 40-epoch Experiment 5 run has not been started.
 
 ---
 
@@ -787,7 +893,8 @@ TBD -- the real 40-epoch Experiment 4 run has not been started.
 | Exp 2B — Longer training | 40 epochs, fixed LR                   |     27.2704 dB |      0.731226 | Complete |
 | Exp 2 — Optimization     | 40 epochs, ReduceLROnPlateau          |     27.2959 dB |      0.734007 | Complete |
 | Exp 3 — Capacity         | 64 features / 8 blocks (7.45x params) | **27.6212 dB** |  **0.743619** | Complete |
-| Exp 4 — Charbonnier loss | L1 -> Charbonnier (eps=1e-3)          |             TBD |           TBD | Planned  |
+| Exp 4 — Charbonnier loss | L1 -> Charbonnier (eps=1e-3)          |     27.5881 dB |      0.743230 | Complete |
+| Exp 5 — L1+SSIM loss     | L1 -> L1 + 0.1*(1-SSIM)               |             TBD |           TBD | Planned  |
 
 ---
 

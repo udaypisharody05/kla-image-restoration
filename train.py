@@ -181,7 +181,7 @@ def load_checkpoint_for_resume(
             raise ValueError(
                 f"Checkpoint loss_config {checkpoint_loss_config} does not match "
                 f"the requested loss_config {loss_config}; pass matching "
-                "--loss/--charbonnier-eps to resume."
+                "--loss/--charbonnier-eps/--ssim-weight to resume."
             )
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -307,7 +307,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--loss",
         type=str,
-        choices=["l1", "charbonnier"],
+        choices=["l1", "charbonnier", "l1_ssim"],
         default="l1",
         help="Reconstruction loss. 'l1' (default) reproduces Experiments 1-3 exactly.",
     )
@@ -316,6 +316,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1e-3,
         help="Charbonnier loss epsilon (ignored unless --loss charbonnier)",
+    )
+    parser.add_argument(
+        "--ssim-weight",
+        type=float,
+        default=0.1,
+        help="Weight on (1 - differentiable SSIM) in L1 + weight*(1-SSIM) (ignored unless --loss l1_ssim)",
     )
     return parser.parse_args()
 
@@ -364,7 +370,7 @@ def main() -> None:
     model = ResidualSRNet(**model_config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    loss_config = build_loss_config(args.loss, args.charbonnier_eps)
+    loss_config = build_loss_config(args.loss, args.charbonnier_eps, args.ssim_weight)
     loss_fn = build_loss(loss_config)
     label = loss_label(loss_config["name"])
     print(f"Loss: {loss_config}")
