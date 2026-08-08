@@ -22,6 +22,7 @@ from train import (
     save_checkpoint,
     train_one_epoch,
     validate,
+    warn_on_resume_config_mismatch,
 )
 
 
@@ -642,3 +643,77 @@ def test_resume_rejects_charbonnier_request_against_l1_ssim_checkpoint(tmp_path:
             torch.device("cpu"),
             loss_config={"name": "charbonnier", "epsilon": 1e-3},
         )
+
+
+# --- Experiment 6: crop-size configuration, logging, and resume-mismatch warning ---
+
+
+def test_build_datasets_with_96_crop_leaves_validation_full_image(tmp_path: Path) -> None:
+    data_dir = _write_discoverable_pairs(tmp_path, count=6, lr_size=128, scale=2)
+    train_dataset, validation_dataset, total = build_datasets(
+        data_dir,
+        val_fraction=0.34,  # -> 2 validation, 4 train out of 6
+        seed=42,
+        crop_size=96,
+        scale=2,
+        max_train_samples=None,
+        max_val_samples=None,
+    )
+    assert total == 6
+    training_sample = train_dataset[0]
+    assert training_sample["input"].shape == (1, 96, 96)
+    assert training_sample["target"].shape == (1, 192, 192)
+    # Validation is built with no transform regardless of crop_size -- full images.
+    validation_sample = validation_dataset[0]
+    assert validation_sample["input"].shape == (1, 128, 128)
+    assert validation_sample["target"].shape == (1, 256, 256)
+
+
+def test_warn_on_resume_config_mismatch_flags_crop_size_change(capsys) -> None:
+    previous_config = {"seed": 42, "val_fraction": 0.2, "crop_size": 96}
+    warn_on_resume_config_mismatch(previous_config, seed=42, val_fraction=0.2, crop_size=64)
+    output = capsys.readouterr().out
+    assert "--crop-size" in output
+    assert "64" in output and "96" in output
+
+
+def test_warn_on_resume_config_mismatch_silent_when_everything_matches(capsys) -> None:
+    previous_config = {"seed": 42, "val_fraction": 0.2, "crop_size": 96}
+    warn_on_resume_config_mismatch(previous_config, seed=42, val_fraction=0.2, crop_size=96)
+    assert capsys.readouterr().out == ""
+
+
+def test_warn_on_resume_config_mismatch_still_flags_seed_and_val_fraction(capsys) -> None:
+    previous_config = {"seed": 42, "val_fraction": 0.2, "crop_size": 64}
+    warn_on_resume_config_mismatch(previous_config, seed=7, val_fraction=0.2, crop_size=64)
+    output = capsys.readouterr().out
+    assert "--seed/--val-fraction" in output
+    assert "--crop-size" not in output
+
+
+def test_checkpoint_stores_experiment_6_crop_size_in_training_config(tmp_path: Path) -> None:
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    training_config = {
+        "epochs": 40,
+        "batch_size": 16,
+        "lr": 1e-4,
+        "seed": 42,
+        "val_fraction": 0.2,
+        "crop_size": 96,
+        "data_dir": "data/Data-public",
+    }
+    checkpoint_path = tmp_path / "exp6_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=10.0,
+        model_config=model_config,
+        training_config=training_config,
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["training_config"]["crop_size"] == 96
+    assert checkpoint["model_config"]["scale"] == 2

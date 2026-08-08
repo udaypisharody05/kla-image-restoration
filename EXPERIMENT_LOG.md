@@ -805,8 +805,7 @@ not translate into a measurable validation improvement.
 
 ## Status
 
-**Planned / infrastructure verified.** The real 40-epoch training run has not been
-executed.
+**Completed and independently verified.**
 
 ## Objective
 
@@ -880,7 +879,122 @@ Lower on both: reject composite loss
 
 ## Result
 
-TBD -- the real 40-epoch Experiment 5 run has not been started.
+```text
+Best checkpoint epoch: 39
+
+Val L1 diagnostic: 0.034065
+Val PSNR: 27.5282 dB
+Val SSIM: 0.747377
+```
+
+Checkpoint: `checkpoints/exp5_l1_ssim/checkpoint_best.pt`
+
+## Comparison vs Experiment 3
+
+| Metric | Exp 3 (L1) | Exp 5 (L1+SSIM) | Change     |
+| ------ | ---------: | ---------------: | ---------: |
+| PSNR   | 27.6212 dB |        27.5282 dB| -0.0930 dB |
+| SSIM   |   0.743619 |          0.747377 | +0.003758  |
+
+## Conclusion
+
+Experiment 5 improved structural similarity (SSIM +0.003758) but reduced PSNR
+(-0.0930 dB) relative to Experiment 3. **Experiment 3 remains the canonical best-PSNR
+model; Experiment 5 is the current best-SSIM model.** Since validation PSNR is the
+project's checkpoint-selection metric and Experiment 6 changes only crop size (not
+loss), Experiment 6 is compared primarily against Experiment 3, with Experiment 5 kept
+as the best-SSIM reference.
+
+---
+
+# Experiment 6 — Larger Training Crop
+
+## Status
+
+**Planned / infrastructure verified.** The real 40-epoch training run has not been
+executed.
+
+## Objective
+
+Determine whether a larger training crop -- more spatial context per training sample --
+improves validation restoration quality for the current best 64-feature / 8-block L1
+model (Experiment 3).
+
+## Change From Experiment 3
+
+```text
+Training crop: 64x64 LR / 128x128 GT -> 96x96 LR / 192x192 GT
+Loss: L1 (unchanged -- Experiment 6 returns to Experiment 3's loss, not Experiment 5's)
+```
+
+Everything else -- architecture (64 features, 8 residual blocks, 630,724 parameters),
+optimizer, initial LR, scheduler config, batch size, epochs, seed, dataset/split,
+augmentation, validation preprocessing, PSNR/SSIM implementation and clipping
+convention, checkpointing/resume semantics -- is unchanged from Experiment 3.
+
+## Crop Parameterization
+
+Crop size was **already fully parameterized** end-to-end before this experiment --
+no rewrite of the transform implementation was needed:
+
+- `train.py` already exposed `--crop-size` (default `64`, unchanged).
+- `src/transforms.py::aligned_paired_crop`/`PairedRandomCrop`/`create_training_transform`
+  already accept an arbitrary LR crop size; the GT crop is always derived automatically
+  as `crop_size * scale` (never a separate argument), so `--crop-size 96` with the
+  existing `scale=2` produces an exact 192x192 GT crop with no new code path.
+- `training_config["crop_size"]` was already stored in checkpoints.
+
+Two real gaps were closed for this experiment: (1) the startup log did not print the
+configured training crop at all -- `train.py` now prints
+`Training crop: LR = 96x96 GT = 192x192 (validation always uses full images)`
+(or `64x64`/`128x128` by default) every run; (2) resuming with a different `--crop-size`
+than a checkpoint's stored `training_config` was not checked at all -- a new
+`warn_on_resume_config_mismatch()` helper (replacing the old inline seed/val-fraction
+check, extended rather than duplicated) now also warns clearly, e.g.
+`--crop-size (64) differs from the checkpoint's stored training crop_size (96)`,
+without blocking the resume, consistent with how seed/val_fraction mismatches are
+already handled (a warning, not a hard rejection like model_config/loss_config, since
+crop size doesn't break tensor-shape compatibility).
+
+## GPU Memory Sanity Check
+
+Synthetic batch `[16, 1, 96, 96]` -> output `[16, 1, 192, 192]` on the RTX 4060 Laptop
+GPU: forward, L1 backward, and one Adam optimizer step all succeeded, all outputs/
+gradients finite. Peak allocated ~774 MiB / peak reserved ~876 MiB, against ~8188 MiB
+total (~10.7% utilization) -- batch size 16 fits comfortably and was **not** reduced.
+
+## Checkpoint Directory
+
+```text
+checkpoints/exp6_crop96/checkpoint_latest.pt
+checkpoints/exp6_crop96/checkpoint_best.pt
+```
+
+Separate from `checkpoints/exp1_baseline/`, `checkpoints/exp2_plateau/`,
+`checkpoints/exp2_fixed40/`, `checkpoints/exp3_capacity/`, `checkpoints/exp4_charbonnier/`,
+and `checkpoints/exp5_l1_ssim/`, all of which remain untouched.
+
+## Benchmark
+
+Compared primarily against Experiment 3 (L1, same architecture, same everything except
+crop size):
+
+```text
+Experiment 3: PSNR = 27.6212 dB, SSIM = 0.743619
+```
+
+Experiment 5 remains the best-SSIM reference (PSNR = 27.5282 dB, SSIM = 0.747377).
+
+```text
+Higher PSNR and SSIM: clear improvement
+Higher PSNR, similar SSIM: useful improvement
+Similar PSNR: larger crop likely not worth the additional training cost
+Lower PSNR: retain 64x64 crop
+```
+
+## Result
+
+TBD -- the real 40-epoch Experiment 6 run has not been started.
 
 ---
 
@@ -892,9 +1006,10 @@ TBD -- the real 40-epoch Experiment 5 run has not been started.
 | Exp 1 — Residual CNN     | First neural baseline (20 epochs)     |     27.0870 dB |      0.725385 | Complete |
 | Exp 2B — Longer training | 40 epochs, fixed LR                   |     27.2704 dB |      0.731226 | Complete |
 | Exp 2 — Optimization     | 40 epochs, ReduceLROnPlateau          |     27.2959 dB |      0.734007 | Complete |
-| Exp 3 — Capacity         | 64 features / 8 blocks (7.45x params) | **27.6212 dB** |  **0.743619** | Complete |
+| Exp 3 — Capacity         | 64 features / 8 blocks (7.45x params) | **27.6212 dB** |      0.743619 | Complete |
 | Exp 4 — Charbonnier loss | L1 -> Charbonnier (eps=1e-3)          |     27.5881 dB |      0.743230 | Complete |
-| Exp 5 — L1+SSIM loss     | L1 -> L1 + 0.1*(1-SSIM)               |             TBD |           TBD | Planned  |
+| Exp 5 — L1+SSIM loss     | L1 -> L1 + 0.1*(1-SSIM)               |     27.5282 dB |  **0.747377** | Complete |
+| Exp 6 — Larger crop      | 64x64 -> 96x96 LR crop                |             TBD |           TBD | Planned  |
 
 ---
 

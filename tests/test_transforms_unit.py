@@ -157,3 +157,90 @@ def test_dataset_training_and_validation_batch_shapes(tmp_path: Path) -> None:
     assert training_batch["target"].shape == (4, 1, 128, 128)
     assert validation_batch["input"].shape == (4, 1, 128, 128)
     assert validation_batch["target"].shape == (4, 1, 256, 256)
+
+
+# --- Experiment 6: 96x96 LR / 192x192 GT crop configuration ---
+
+
+def test_create_training_transform_default_crop_is_still_64() -> None:
+    import inspect
+
+    default_crop_size = inspect.signature(create_training_transform).parameters["crop_size"].default
+    assert default_crop_size == 64
+
+
+def test_96_crop_produces_exact_96_lr_and_192_gt_shapes() -> None:
+    low_resolution, ground_truth = _coordinate_pair(128, 128)
+    cropped_lr, cropped_gt = aligned_paired_crop(
+        low_resolution, ground_truth, crop_size=96, y=16, x=16, scale=2
+    )
+    assert cropped_lr.shape == (1, 96, 96)
+    assert cropped_gt.shape == (1, 192, 192)
+    assert torch.equal(cropped_lr, low_resolution[:, 16:112, 16:112])
+    assert torch.equal(cropped_gt, ground_truth[:, 32:224, 32:224])
+
+
+def test_96_crop_is_spatially_aligned_at_scale_2() -> None:
+    low_resolution, ground_truth = _coordinate_pair(128, 128)
+    cropped_lr, cropped_gt = aligned_paired_crop(
+        low_resolution, ground_truth, crop_size=96, y=10, x=20, scale=2
+    )
+    _assert_exact_2x_alignment(cropped_lr, cropped_gt)
+
+
+def test_96_crop_via_paired_random_crop_and_training_transform() -> None:
+    low_resolution, ground_truth = _coordinate_pair(128, 128)
+    cropper = PairedRandomCrop(crop_size=96, scale=2, generator=torch.Generator().manual_seed(0))
+    cropped_lr, cropped_gt = cropper(low_resolution, ground_truth)
+    assert cropped_lr.shape == (1, 96, 96)
+    assert cropped_gt.shape == (1, 192, 192)
+    _assert_exact_2x_alignment(cropped_lr, cropped_gt)
+
+    training_transform = create_training_transform(crop_size=96, seed=7)
+    transformed_lr, transformed_gt = training_transform(low_resolution, ground_truth)
+    assert transformed_lr.shape == (1, 96, 96)
+    assert transformed_gt.shape == (1, 192, 192)
+    _assert_exact_2x_alignment(transformed_lr, transformed_gt)
+    assert torch.isfinite(transformed_lr).all()
+    assert torch.isfinite(transformed_gt).all()
+
+
+def test_96_crop_dataset_batch_shapes_while_validation_stays_full_image(
+    tmp_path: Path,
+) -> None:
+    """Crop size only affects the training dataset; validation must be unaffected."""
+    pairs = _write_pairs(tmp_path)
+    training_dataset = PairedRestorationDataset(
+        pairs, transform=create_training_transform(crop_size=96, seed=42)
+    )
+    validation_dataset = PairedRestorationDataset(pairs)  # no transform, same as always
+    training_batch = next(iter(create_dataloader(training_dataset, batch_size=4, shuffle=False)))
+    validation_batch = next(
+        iter(create_dataloader(validation_dataset, batch_size=4, shuffle=False))
+    )
+    assert training_batch["input"].shape == (4, 1, 96, 96)
+    assert training_batch["target"].shape == (4, 1, 192, 192)
+    # Unchanged from the 64-crop test above: validation is always full-image.
+    assert validation_batch["input"].shape == (4, 1, 128, 128)
+    assert validation_batch["target"].shape == (4, 1, 256, 256)
+
+
+def test_96_crop_exceeding_source_image_fails_clearly() -> None:
+    low_resolution, ground_truth = _coordinate_pair(64, 64)  # smaller than a 96 crop
+    with pytest.raises(ValueError, match="exceeds"):
+        PairedRandomCrop(crop_size=96)(low_resolution, ground_truth)
+
+
+@pytest.mark.parametrize("crop_size", [0, -1, -96])
+def test_non_positive_crop_size_is_rejected(crop_size: int) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        PairedRandomCrop(crop_size=crop_size)
+
+
+def test_96_crop_augmentation_alignment_still_correct() -> None:
+    low_resolution, ground_truth = _coordinate_pair(128, 128)
+    transform = create_training_transform(crop_size=96, seed=3, augment=True)
+    transformed_lr, transformed_gt = transform(low_resolution, ground_truth)
+    assert transformed_lr.shape == (1, 96, 96)
+    assert transformed_gt.shape == (1, 192, 192)
+    _assert_exact_2x_alignment(transformed_lr, transformed_gt)

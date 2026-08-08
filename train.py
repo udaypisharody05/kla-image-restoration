@@ -112,6 +112,33 @@ def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return optimizer.param_groups[0]["lr"]
 
 
+def warn_on_resume_config_mismatch(
+    previous_config: dict, seed: int, val_fraction: float, crop_size: int
+) -> None:
+    """Print explicit (never silent) warnings when resume args differ from what
+    the checkpoint's stored ``training_config`` actually used.
+
+    Unlike ``model_config``/``loss_config`` (hard-rejected in
+    ``load_checkpoint_for_resume`` since they change the architecture or the
+    objective being optimized), these fields change the data pipeline/split
+    without breaking anything structurally, so a warning -- not a rejection --
+    is the established, less disruptive policy for this class of setting.
+    """
+    if previous_config.get("seed") != seed or previous_config.get("val_fraction") != val_fraction:
+        print(
+            "WARNING: --seed/--val-fraction differ from the checkpoint's stored "
+            f"training_config ({previous_config}); this changes which pairs are "
+            "in the train/validation split and makes best_val_psnr incomparable."
+        )
+    if previous_config.get("crop_size") != crop_size:
+        print(
+            f"WARNING: --crop-size ({crop_size}) differs from the checkpoint's "
+            f"stored training crop_size ({previous_config.get('crop_size')}); training "
+            "will continue using the new crop size immediately, which is a different "
+            "training regime than produced this checkpoint's saved metrics."
+        )
+
+
 def save_checkpoint(
     path: Path,
     model: nn.Module,
@@ -345,6 +372,11 @@ def main() -> None:
         f"Discovered {total_pairs} pairs -> "
         f"train={len(train_dataset)} val={len(validation_dataset)}"
     )
+    print(
+        f"Training crop: LR = {args.crop_size}x{args.crop_size} "
+        f"GT = {args.crop_size * args.scale}x{args.crop_size * args.scale} "
+        "(validation always uses full images)"
+    )
 
     train_loader = create_dataloader(
         train_dataset,
@@ -409,14 +441,9 @@ def main() -> None:
             f"(best Val PSNR so far: {best_val_psnr:.4f} dB, "
             f"current LR: {current_lr(optimizer):.6e})"
         )
-        if previous_config.get("seed") != args.seed or previous_config.get(
-            "val_fraction"
-        ) != args.val_fraction:
-            print(
-                "WARNING: --seed/--val-fraction differ from the checkpoint's stored "
-                f"training_config ({previous_config}); this changes which pairs are "
-                "in the train/validation split and makes best_val_psnr incomparable."
-            )
+        warn_on_resume_config_mismatch(
+            previous_config, args.seed, args.val_fraction, args.crop_size
+        )
         if start_epoch > args.epochs:
             print(f"Nothing to do: resumed epoch {start_epoch} is beyond --epochs {args.epochs}.")
             return
