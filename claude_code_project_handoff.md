@@ -1,0 +1,89 @@
+# KLA Image Restoration — Project Handoff
+
+This file did not exist before this milestone; it is created here to serve as the
+single onboarding doc for future sessions. Keep it updated as decisions get made,
+but do not delete established context below without a strong reason.
+
+## Established project decisions (do not change without a genuine bug)
+
+- Dataset: 3,200 paired grayscale `.npy` training samples (`float32`, `[H,W]`, 1 channel).
+  - LR (`NoisyLR`) is `128x128`; GT is `256x256` (exact 2x). Raw values may fall
+    outside `[0,1]`; GT is expected within `[0,1]`.
+  - Discovery/pairing is generic and directory-name/content driven; see
+    `src/dataset_discovery.py` (`discover_layout`, `discover_pairs`). Pairs are
+    matched by identical filename stem.
+- Canonical split: `src/splits.py::split_pairs(pairs, val_fraction=0.2, seed=42)` →
+  2,560 train / 640 validation. Deterministic via `numpy.random.default_rng(42)`.
+  Reused everywhere (bicubic baseline, PyTorch datasets, training).
+- Scale factor: 2x, always.
+- Training crop: LR `64x64` → GT `128x128`, spatially aligned
+  (`src/transforms.py::create_training_transform`, default `augment=True` with
+  paired flips/90-degree rotations). Validation always uses full images,
+  `transform=None`, no augmentation — stays comparable to the bicubic baseline.
+- Dataset (`data/`) and checkpoints (`checkpoints/`, `*.pt`, `*.pth`, `*.ckpt`) are
+  excluded from Git via `.gitignore`. Do not commit either.
+- Bicubic validation baseline (`evaluate_baseline.py`, `results/bicubic_baseline.json`):
+  **PSNR 23.1413 dB, SSIM 0.550604** (grayscale SSIM via scikit-image, `data_range=1.0`,
+  prediction clipped to `[0,1]` for metrics only). This is the number every learned
+  model should be compared against — do not claim improvement without measuring it.
+- Test conventions: `pytest -m "not integration"` runs fast, dataset-free,
+  GPU-free unit tests (uses `tmp_path` + synthetic arrays). `pytest -m integration`
+  exercises the real ~3,200-sample dataset under `data/` (or `SEMICON_DATA_DIR`) and
+  is slow (~38 minutes for the full suite); it is not run automatically by agents
+  unless a change specifically requires it.
+- Docker: `Dockerfile` runs the unit test suite by default; not redesigned here.
+
+## Milestone: first trainable neural baseline (added this session)
+
+Added a small residual CNN and the minimum training/evaluation infrastructure to
+verify the learning pipeline end-to-end. Deliberately simple — no GANs, no
+perceptual/VGG loss, no transformers, no pretrained weights.
+
+- `src/models/residual_sr.py` — `ResidualSRNet`: conv_in → 4 `ResidualBlock`s (2x
+  conv3x3 + identity skip) → conv → global skip around the residual body →
+  conv → `nn.PixelShuffle(2)`. Defaults: `in_channels=1, out_channels=1,
+  num_features=32, num_blocks=4, scale=2` (matches the grayscale dataset, not the
+  "RGB" wording in generic SR task templates — this dataset is 1-channel).
+  ~84.7k trainable parameters.
+- `src/metrics.py` — `psnr()`/`ssim()` accept batched `[B,C,H,W]` (or unbatched
+  `[C,H,W]`) torch tensors and internally call the *existing*
+  `src.baseline.peak_signal_noise_ratio`/`structural_similarity_index` per image,
+  so neural validation numbers use the exact same formulas as the bicubic
+  baseline. No new metric dependency added.
+- `train.py` — CLI training entry point. Reuses `discover_layout`/`discover_pairs`,
+  `split_pairs`, `PairedRestorationDataset`, `create_dataloader`,
+  `create_training_transform`. Defaults: `L1Loss`, Adam, `lr=1e-4`, `seed=42`,
+  `val_fraction=0.2`, `crop_size=64`, `scale=2`. Device auto-selects CUDA else CPU
+  and prints the choice. Seeds `random`/`numpy`/`torch` for reproducibility.
+  Saves `checkpoint_latest.pt` every epoch and `checkpoint_best.pt` whenever
+  validation PSNR improves, each containing model/optimizer state, epoch,
+  best validation PSNR, and model/training config.
+- `evaluate_checkpoint.py` — loads a checkpoint, reconstructs `ResidualSRNet`
+  from its stored `model_config`, evaluates the fixed validation split, prints
+  L1/PSNR/SSIM plus the delta versus the bicubic baseline. No test-set inference.
+- Tests added (all fast, no dataset, no GPU): `tests/test_model_unit.py`,
+  `tests/test_metrics_unit.py`, `tests/test_training_unit.py`. 55 unit tests pass
+  total (`pytest -m "not integration"`).
+- Smoke-verified: `python train.py --epochs 1 --max-train-samples 16
+  --max-val-samples 8 --checkpoint-dir <tmp>` against the real dataset — dataset
+  loading, forward/backward, optimizer step, validation, and both checkpoints all
+  confirmed working. Val PSNR after this trivial smoke run (~6.4 dB) is far below
+  bicubic, as expected for 16 samples / 1 epoch with a freshly initialized network
+  — not a real training result.
+
+### Next step (not yet run)
+
+A real training experiment, e.g.:
+
+```bash
+python train.py --data-dir data/Data-public --epochs 20 --batch-size 16 --lr 1e-4 --checkpoint-dir checkpoints
+```
+
+Then compare with:
+
+```bash
+python evaluate_checkpoint.py --checkpoint checkpoints/checkpoint_best.pt --data-dir data/Data-public
+```
+
+Epoch count/architecture width have not been tuned — this milestone only
+establishes that the pipeline works, not that the model is competitive.

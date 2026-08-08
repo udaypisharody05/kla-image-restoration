@@ -204,3 +204,48 @@ validation_dataset = PairedRestorationDataset(validation_pairs, scale=2)
 The default augmentation policy independently applies horizontal and vertical flips with probability 0.5 and uniformly selects a rotation from 0, 90, 180, or 270 degrees. No interpolation is used. There are no intensity changes, clipping, normalization, resizing, padding, or quantization; raw float32 NoisyLR values are preserved.
 
 By default transforms use PyTorch's process-local RNG, which DataLoader workers seed in the standard way. Pass `seed=` or a `torch.Generator` to `create_training_transform` for deterministic single-worker tests or runs. Generator state advances on every access, so a sample is not permanently assigned one crop. Validation should continue using `transform=None` and complete `128x128`/`256x256` images so neural metrics remain comparable with the bicubic PSNR and SSIM baseline.
+
+## Neural Restoration Baseline
+
+The first trainable model is a small residual CNN (`src/models/residual_sr.py`): an
+initial convolution, four residual blocks, a convolution, then `PixelShuffle(2)` to
+produce the 2x output. It has no pretrained weights, no normalization layers, and
+about 85k parameters, so it trains and debugs quickly on CPU. `src/metrics.py`
+provides batched, torch-tensor PSNR/SSIM built directly on the existing bicubic
+baseline's metric functions, so neural and bicubic numbers stay directly comparable.
+
+Train with the canonical seed-42, 2560/640 split:
+
+```bash
+python train.py --data-dir data/Data-public --epochs 20 --batch-size 16 --lr 1e-4
+```
+
+Device selection defaults to CUDA if available, otherwise CPU, and is printed at
+startup. Every epoch prints train L1, validation L1/PSNR/SSIM, and the established
+bicubic reference (PSNR 23.1413 dB, SSIM 0.550604) for direct comparison. See
+`python train.py --help` for all options (batch size, learning rate, seed, device,
+checkpoint directory, worker count, and `--max-train-samples`/`--max-val-samples`
+subset limits for quick smoke runs).
+
+A tiny smoke run that only verifies the pipeline (not real training):
+
+```bash
+python train.py --epochs 1 --max-train-samples 16 --max-val-samples 8 --checkpoint-dir checkpoints
+```
+
+Checkpoints are written to `--checkpoint-dir` (default `checkpoints/`, already
+excluded from Git by `.gitignore`) as `checkpoint_latest.pt` (every epoch) and
+`checkpoint_best.pt` (kept whenever validation PSNR improves). Each checkpoint
+stores the model and optimizer state, epoch, best validation PSNR, and the model
+and training configuration needed to reconstruct it.
+
+Evaluate a saved checkpoint against the fixed validation split:
+
+```bash
+python evaluate_checkpoint.py --checkpoint checkpoints/checkpoint_best.pt --data-dir data/Data-public
+```
+
+This reconstructs the model from the checkpoint's stored configuration, evaluates
+the deterministic validation split, and prints L1/PSNR/SSIM alongside the bicubic
+baseline and the delta versus it. It does not run inference on the competition
+test set.
