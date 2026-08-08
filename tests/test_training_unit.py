@@ -256,3 +256,68 @@ def test_max_samples_only_truncate_the_canonical_split(tmp_path: Path) -> None:
     assert [p.pair_id for p in truncated_validation.pairs] == [
         p.pair_id for p in full_validation.pairs[:2]
     ]
+
+
+# --- Experiment 3: checkpointing and resume with the larger 64/8 capacity config ---
+
+
+def test_checkpoint_stores_experiment_3_model_config(tmp_path: Path) -> None:
+    exp3_config = {
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 64,
+        "num_blocks": 8,
+        "scale": 2,
+    }
+    model = ResidualSRNet(**exp3_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+
+    checkpoint_path = tmp_path / "exp3_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=10.0,
+        model_config=exp3_config,
+        training_config={},
+    )
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["model_config"]["num_features"] == 64
+    assert checkpoint["model_config"]["num_blocks"] == 8
+
+
+def test_resume_rejects_experiment_2_checkpoint_for_experiment_3_config(
+    tmp_path: Path,
+) -> None:
+    """Resuming a 64/8 (Experiment 3) run from a 32/4 (Experiment 1/2) checkpoint
+    must fail with a clear, actionable error -- not a cryptic tensor-shape mismatch.
+    """
+    exp2_config = {
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 32,
+        "num_blocks": 4,
+        "scale": 2,
+    }
+    exp2_model = ResidualSRNet(**exp2_config)
+    exp2_optimizer = torch.optim.Adam(exp2_model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp2_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        exp2_model,
+        exp2_optimizer,
+        epoch=40,
+        best_val_psnr=27.2959,
+        model_config=exp2_config,
+        training_config={},
+    )
+
+    exp3_config = dict(exp2_config, num_features=64, num_blocks=8)
+    exp3_model = ResidualSRNet(**exp3_config)
+    exp3_optimizer = torch.optim.Adam(exp3_model.parameters(), lr=1e-4)
+    with pytest.raises(ValueError, match="model_config"):
+        load_checkpoint_for_resume(
+            checkpoint_path, exp3_model, exp3_optimizer, exp3_config, torch.device("cpu")
+        )

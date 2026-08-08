@@ -519,13 +519,177 @@ part of any experiment record.
 
 ---
 
+# Experiment 2B — Same Model, 40 Epochs, Fixed LR (no scheduler)
+
+## Status
+
+**Completed**
+
+## Objective
+
+Isolate how much of any Experiment-2-vs-Experiment-1 gain comes from simply training
+longer (20 to 40 epochs) versus from the LR scheduler itself. Same architecture, same
+fixed `lr=1e-4`, no scheduler -- only the epoch count changed relative to Experiment 1.
+
+## Training Configuration
+
+```text
+Architecture:      unchanged (32 features, 4 residual blocks, 84,708 parameters)
+Loss:              L1Loss
+Optimizer:         Adam
+Learning rate:     1e-4 (fixed, no scheduler)
+Batch size:        16
+Epochs:            40
+Split seed:        42
+```
+
+## Best Result
+
+```text
+Best PSNR: 27.2704 dB
+SSIM at best-PSNR epoch: 0.731226
+```
+
+Checkpoint: `checkpoints/exp2_fixed40/checkpoint_best.pt`
+
+---
+
+# Experiment 2 — Same Model, 40 Epochs, ReduceLROnPlateau
+
+## Status
+
+**Completed**
+
+## Training Configuration
+
+```text
+Architecture:      unchanged (32 features, 4 residual blocks, 84,708 parameters)
+Loss:              L1Loss
+Optimizer:         Adam
+Initial LR:        1e-4
+Scheduler:         ReduceLROnPlateau
+  Mode:            max
+  Factor:          0.5
+  Patience:        3
+  Min LR:          1e-6
+Batch size:        16
+Epochs:            40
+Split seed:        42
+```
+
+## Best Result
+
+```text
+Best PSNR: 27.2959 dB
+SSIM: 0.734007
+```
+
+Checkpoint: `checkpoints/exp2_plateau/checkpoint_best.pt`
+
+## Controlled Comparison -- Experiment 1 vs 2B vs 2
+
+| Experiment | Epochs | Scheduler | Best PSNR      | SSIM at best PSNR |
+| ---------- | -----: | --------- | --------------: | -----------------: |
+| Exp 1      |     20 | none      |      27.0870 dB |            0.725385 |
+| Exp 2B     |     40 | none      |      27.2704 dB |            0.731226 |
+| Exp 2      |     40 | plateau   |  **27.2959 dB** |        **0.734007** |
+
+```text
+20 -> 40 epochs, fixed LR:         +0.1834 dB  (Exp 1 -> Exp 2B)
+40 epochs, fixed LR -> scheduled:  +0.0255 dB  (Exp 2B -> Exp 2)
+```
+
+## Conclusion
+
+Most of the gain from Experiment 1 to Experiment 2 came from longer training, not from
+the learning-rate schedule. The scheduler contributed a small additional improvement on
+top of that (+0.0255 dB at the best epoch) and will be retained as the default training
+recipe for subsequent experiments, since it is at worst neutral and did provide a
+measured (if modest) gain. This result argues against attributing the ~27 dB plateau
+primarily to the fixed learning rate -- the next controlled variable to test is model
+capacity (Experiment 3).
+
+---
+
+# Experiment 3 — Increased Model Capacity
+
+## Status
+
+**Planned / infrastructure verified.** The real 40-epoch training run has not been
+executed.
+
+## Objective
+
+Test whether additional model capacity improves the current neural baseline, using
+Experiment 2 (40 epochs, ReduceLROnPlateau) as the training-recipe reference.
+
+## Changes From Experiment 2
+
+```text
+Feature channels:  32 -> 64
+Residual blocks:    4 -> 8
+```
+
+Everything else (loss, optimizer, initial LR, scheduler config, batch size, epochs,
+dataset/split/seed, crop sizes, augmentation, validation preprocessing, metric
+implementation and clipping convention, checkpointing/resume behavior) is unchanged from
+Experiment 2.
+
+## Architecture
+
+Same `ResidualSRNet` structure as Experiments 1/2 (no new architecture family):
+
+```text
+Noisy LR
+-> 3x3 conv (1 -> 64 channels)
+-> 8 Residual Blocks (conv3x3 -> ReLU -> conv3x3 -> identity skip)
+-> 3x3 conv
+-> global residual feature skip
+-> upsampling 3x3 conv (64 -> 4 channels)
+-> PixelShuffle x2
+-> restored grayscale output
+```
+
+## Parameter Count (verified by direct instantiation, not estimated)
+
+```text
+Experiment 2 parameters: 84,708
+Experiment 3 parameters: 630,724
+Capacity multiplier:     7.446x
+```
+
+## CUDA Sanity Check
+
+Synthetic batch `[16, 1, 64, 64]` -> output `[16, 1, 128, 128]` on the RTX 4060 Laptop
+GPU: forward, L1 backward, and one Adam optimizer step all succeeded. Peak allocated GPU
+memory ~348 MiB / peak reserved ~448 MiB, against ~8188 MiB total (~5.5% utilization at
+batch size 16) -- batch size 16 fits comfortably and was left unchanged.
+
+## Checkpoint Directory
+
+```text
+checkpoints/exp3_capacity/checkpoint_latest.pt
+checkpoints/exp3_capacity/checkpoint_best.pt
+```
+
+Separate from `checkpoints/exp1_baseline/`, `checkpoints/exp2_plateau/`, and
+`checkpoints/exp2_fixed40/`, all of which remain untouched.
+
+## Result
+
+TBD -- the real 40-epoch Experiment 3 run has not been started.
+
+---
+
 # Experiment History
 
-| Experiment           | Main Change                   |      Best PSNR |    Best SSIM | Status   |
-| -------------------- | ----------------------------- | -------------: | -----------: | -------- |
-| Bicubic              | Classical interpolation       |     23.1413 dB |     0.550604 | Complete |
-| Exp 1 — Residual CNN | First neural baseline         | **27.0870 dB** | **0.725385** | Complete |
-| Exp 2 — Optimization | LR schedule / longer training |            TBD |          TBD | Planned  |
+| Experiment               | Main Change                           |      Best PSNR |    Best SSIM | Status   |
+| ------------------------ | -------------------------------------- | -------------: | -----------: | -------- |
+| Bicubic                  | Classical interpolation               |     23.1413 dB |     0.550604 | Complete |
+| Exp 1 — Residual CNN     | First neural baseline (20 epochs)     |     27.0870 dB |      0.725385 | Complete |
+| Exp 2B — Longer training | 40 epochs, fixed LR                   |     27.2704 dB |      0.731226 | Complete |
+| Exp 2 — Optimization     | 40 epochs, ReduceLROnPlateau          | **27.2959 dB** |  **0.734007** | Complete |
+| Exp 3 — Capacity         | 64 features / 8 blocks (7.45x params) |             TBD |           TBD | Planned  |
 
 ---
 
