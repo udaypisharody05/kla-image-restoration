@@ -87,3 +87,25 @@ python evaluate_checkpoint.py --checkpoint checkpoints/checkpoint_best.pt --data
 
 Epoch count/architecture width have not been tuned — this milestone only
 establishes that the pipeline works, not that the model is competitive.
+
+## Optional GPU thermal guard (infrastructure, not an experiment)
+
+Thermally constrained NVIDIA laptops (this project's dev machine sustains ~87-90°C
+under long training runs) can optionally use `src/thermal.py`'s `GpuTemperatureGuard`
+via `train.py`:
+
+```bash
+python train.py ... --gpu-temp-limit 82 --gpu-temp-resume 78 --gpu-temp-check-interval 5 --gpu-temp-poll-seconds 3
+```
+
+Disabled by default (`--gpu-temp-limit 0`, the default) — in that case `train.py` never
+calls `nvidia-smi` and behaves exactly as before this feature existed. When enabled, it
+pauses only between fully completed training/validation batches (never mid-batch),
+reading GPU temperature via `nvidia-smi` every `--gpu-temp-check-interval` batches, and
+sleeps in `--gpu-temp-poll-seconds` increments until temperature drops to
+`--gpu-temp-resume` (a lower resume threshold than the pause limit avoids rapid
+pause/resume toggling). This changes wall-clock time only — model, optimizer, loss,
+scheduler, data order, and metrics are completely unaffected, and resuming a checkpoint
+with different thermal settings than it was originally trained with is always legal
+(thermal settings are recorded in `training_config` for reference only, never checked on
+resume).

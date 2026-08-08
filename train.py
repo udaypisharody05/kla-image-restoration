@@ -28,6 +28,7 @@ from src.losses import build_loss, build_loss_config, loss_label
 from src.metrics import psnr, ssim
 from src.models import ResidualSRNet
 from src.splits import split_pairs
+from src.thermal import GpuTemperatureGuard
 from src.transforms import create_training_transform
 
 
@@ -239,6 +240,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
     device: torch.device,
+    thermal_guard: GpuTemperatureGuard | None = None,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -252,8 +254,16 @@ def train_one_epoch(
         loss.backward()
         optimizer.step()
         batch_size = inputs.shape[0]
+        # loss.item() below blocks until this batch's GPU work has completed
+        # (a CUDA tensor .item() call synchronizes implicitly), so the
+        # thermal check that follows never needs its own explicit
+        # torch.cuda.synchronize() -- see src/thermal.py for details.
         total_loss += loss.item() * batch_size
         total_count += batch_size
+        # Batch is fully complete (optimizer.step() already applied); safe to
+        # pause here without redoing, skipping, or partially processing work.
+        if thermal_guard is not None:
+            thermal_guard.on_batch_complete()
     return total_loss / total_count
 
 
@@ -263,6 +273,7 @@ def validate(
     loader: torch.utils.data.DataLoader,
     loss_fn: nn.Module,
     device: torch.device,
+    thermal_guard: GpuTemperatureGuard | None = None,
 ) -> dict[str, float]:
     model.eval()
     total_loss = total_psnr = total_ssim = 0.0
@@ -281,6 +292,10 @@ def validate(
         total_psnr += psnr(outputs, targets) * batch_size
         total_ssim += ssim(outputs, targets) * batch_size
         total_count += batch_size
+        # Reuses the same guard/abstraction as training; never touches model
+        # state or metrics, only pauses between already-completed batches.
+        if thermal_guard is not None:
+            thermal_guard.on_batch_complete()
     return {
         "loss": total_loss / total_count,
         "psnr": total_psnr / total_count,
@@ -350,6 +365,30 @@ def parse_args() -> argparse.Namespace:
         default=0.1,
         help="Weight on (1 - differentiable SSIM) in L1 + weight*(1-SSIM) (ignored unless --loss l1_ssim)",
     )
+    parser.add_argument(
+        "--gpu-temp-limit",
+        type=float,
+        default=0.0,
+        help="GPU temp (C) at which to enter a thermal pause between batches; 0 disables the guard (default)",
+    )
+    parser.add_argument(
+        "--gpu-temp-resume",
+        type=float,
+        default=78.0,
+        help="GPU temp (C) at/below which to resume after a thermal pause (ignored when the guard is disabled)",
+    )
+    parser.add_argument(
+        "--gpu-temp-check-interval",
+        type=int,
+        default=5,
+        help="Completed batches between GPU temperature checks (ignored when the guard is disabled)",
+    )
+    parser.add_argument(
+        "--gpu-temp-poll-seconds",
+        type=float,
+        default=3.0,
+        help="Seconds to sleep between temperature checks while paused (ignored when the guard is disabled)",
+    )
     return parser.parse_args()
 
 
@@ -358,6 +397,28 @@ def main() -> None:
     set_seed(args.seed)
     device = select_device(args.device)
     print(f"Using device: {device}")
+
+    # Constructed (and validated) early, before any dataset work, so invalid
+    # thermal args fail fast. Disabled by default (--gpu-temp-limit 0); when
+    # disabled this never calls nvidia-smi or sleeps, so CPU/CUDA training
+    # behaves exactly as before this feature existed.
+    thermal_guard = GpuTemperatureGuard(
+        limit=args.gpu_temp_limit,
+        resume_threshold=args.gpu_temp_resume,
+        check_interval=args.gpu_temp_check_interval,
+        poll_seconds=args.gpu_temp_poll_seconds,
+    )
+    if thermal_guard.enabled:
+        print(
+            "GPU temperature guard:\n"
+            f"  limit: {thermal_guard.limit:.0f}°C\n"
+            f"  resume: {thermal_guard.resume_threshold:.0f}°C\n"
+            f"  check interval: every {thermal_guard.check_interval} batches\n"
+            f"  polling interval while paused: {thermal_guard.poll_seconds} seconds"
+        )
+        thermal_guard.verify_monitoring()  # fail fast if nvidia-smi is broken/missing
+    else:
+        print("GPU temperature guard: disabled")
 
     train_dataset, validation_dataset, total_pairs = build_datasets(
         args.data_dir,
@@ -422,6 +483,14 @@ def main() -> None:
         "val_fraction": args.val_fraction,
         "crop_size": args.crop_size,
         "data_dir": str(args.data_dir),
+        # Informational only -- a runtime/wall-clock setting, not part of the
+        # ML computation. warn_on_resume_config_mismatch() and
+        # load_checkpoint_for_resume() deliberately never compare these
+        # fields, so resuming is always legal regardless of thermal settings.
+        "gpu_temp_limit": args.gpu_temp_limit,
+        "gpu_temp_resume": args.gpu_temp_resume,
+        "gpu_temp_check_interval": args.gpu_temp_check_interval,
+        "gpu_temp_poll_seconds": args.gpu_temp_poll_seconds,
     }
 
     start_epoch = 1
@@ -454,8 +523,13 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         started = time.time()
         epoch_lr = current_lr(optimizer)
-        train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
-        val_metrics = validate(model, validation_loader, loss_fn, device)
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, loss_fn, device, thermal_guard
+        )
+        val_metrics = validate(model, validation_loader, loss_fn, device, thermal_guard)
+        # Wall-clock only: includes any thermal-pause sleep time when the
+        # guard is enabled and triggered. Not compensated for -- "Epoch time"
+        # is elapsed wall-clock time, same as before this feature existed.
         elapsed = time.time() - started
 
         print(f"Epoch {epoch}")
