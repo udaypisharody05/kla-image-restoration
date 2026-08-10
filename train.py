@@ -349,7 +349,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--loss",
         type=str,
-        choices=["l1", "charbonnier", "l1_ssim"],
+        choices=["l1", "mse", "charbonnier", "l1_ssim"],
         default="l1",
         help="Reconstruction loss. 'l1' (default) reproduces Experiments 1-3 exactly.",
     )

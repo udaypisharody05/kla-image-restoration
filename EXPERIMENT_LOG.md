@@ -1152,6 +1152,100 @@ independent evaluation.
 
 ---
 
+# Experiment 8 — MSE Loss
+
+## Status
+
+**PLANNED / PREPARED.** Infrastructure implemented, unit-tested, CUDA-sanity-checked,
+and smoke-tested. The real 40-epoch training run has **not** been executed -- no
+results below are real training results.
+
+## Objective
+
+Test whether directly optimizing mean squared error (rather than L1) improves
+validation PSNR. PSNR is a direct (monotonic, log-scaled) function of MSE, so directly
+minimizing MSE during training may align the training objective more closely with the
+checkpoint-selection metric than L1 does.
+
+## Planned Configuration (identical to Experiment 6 except loss)
+
+```text
+Architecture:      ResidualSRNet, unchanged (64 features, 8 residual blocks, 630,724 parameters)
+PixelShuffle:       x2
+Scale:              2
+
+Loss:               L1Loss -> MSELoss (torch.nn.MSELoss)
+Optimizer:          Adam
+Initial LR:         1e-4
+Scheduler:          ReduceLROnPlateau
+  Mode:             max
+  Factor:           0.5
+  Patience:         3
+  Min LR:           1e-6
+
+Batch size:         16
+Epochs:             40
+Seed:               42
+
+Training crop:      LR 96x96 / GT 192x192 (returns to Experiment 6's crop, not Experiment 7's)
+Validation:         full images, unchanged (128x128 LR / 256x256 GT, no augmentation)
+
+Train samples:      2560
+Validation samples: 640
+```
+
+Change from Experiment 6: reconstruction loss only (L1 -> MSE). Everything else --
+architecture, optimizer, scheduler, batch size, epoch count, seed, crop size,
+dataset/split, validation preprocessing, metric implementation and clipping convention,
+checkpointing/resume semantics -- unchanged.
+
+## Implementation
+
+`src/losses.py` extends `build_loss_config`/`build_loss`/`loss_label` with `"mse"` (no
+parallel logic; same pattern as `l1`/`charbonnier`/`l1_ssim`). `train.py`'s `--loss`
+choices become `{l1, mse, charbonnier, l1_ssim}`; default remains `l1`, so all prior
+experiments stay exactly reproducible with no flag. MSE checkpoints store
+`loss_config: {"name": "mse"}`. Because `load_checkpoint_for_resume`'s loss-config check
+already compares the stored and requested `loss_config` dicts generically, MSE
+automatically got the same hard-reject resume protection as every other loss with no
+extra code -- verified live in both directions (an MSE checkpoint rejects `--loss l1`,
+and the real Experiment 6 L1 checkpoint rejects `--loss mse`). `evaluate_checkpoint.py`
+required **no changes** -- it already reports the checkpoint's training loss generically
+via `loss_label()` and always scores an actual-L1 diagnostic regardless of training loss
+(so `Val L1` stays comparable across every experiment, MSE included).
+
+## Verification Performed (infrastructure only, not training results)
+
+- Unit tests: MSE math correctness, identical-inputs -> 0, differentiability/finite
+  gradients, `loss_config` format, resume accept/reject in both directions (including
+  against a real Experiment 6-shaped legacy checkpoint), regression coverage for
+  L1/Charbonnier/L1+SSIM, `evaluate_checkpoint.load_model` reads an MSE checkpoint.
+- CUDA sanity: `[16,1,96,96]` -> `[16,1,192,192]` on the RTX 4060 Laptop GPU, forward/
+  MSE/backward/optimizer step all succeeded, finite throughout. Peak allocated ~776 MiB
+  / peak reserved ~876 MiB of ~8188 MiB total -- consistent with Experiment 6/7's memory
+  footprint (loss choice doesn't materially affect memory).
+- Real-data smoke run (`checkpoints/exp8_mse_smoke/`, deleted afterward -- **not**
+  `checkpoints/exp8_mse/`): 32 train / 16 val samples, 1-2 epochs, `--loss mse
+  --crop-size 96 --seed 42`, same scheduler as Experiment 6. Training/validation/
+  checkpointing/resume all worked; checkpoint correctly stored
+  `loss_config: {"name": "mse"}`; `evaluate_checkpoint.py` correctly read it back and
+  printed `Training loss: MSE ({'name': 'mse'})`.
+
+## Checkpoint Directory (for the eventual real run)
+
+```text
+checkpoints/exp8_mse/checkpoint_latest.pt
+checkpoints/exp8_mse/checkpoint_best.pt
+```
+
+Separate from all prior experiment directories, all of which remain untouched.
+
+## Result
+
+TBD -- the real 40-epoch Experiment 8 run has not been started.
+
+---
+
 # Official Test-Set Inference Sanity Check (infrastructure, not a new experiment)
 
 After independently verifying Experiment 6, a small inference sanity check was run
@@ -1183,6 +1277,7 @@ above, which remains the only quantitative comparison in this log.
 | Exp 5 — L1+SSIM loss     | L1 -> L1 + 0.1*(1-SSIM)               |     27.5282 dB |  **0.747377** | Complete |
 | Exp 6 — Larger crop      | 64x64 -> 96x96 LR crop                |     27.7090 dB |      0.745634 | Complete |
 | Exp 7 — Full-image crop  | 96x96 -> 128x128 (full image) LR crop | **27.7101 dB** |      0.743748 | Complete |
+| Exp 8 — MSE loss         | L1 -> MSE (torch.nn.MSELoss)          |             TBD |           TBD | Planned  |
 
 Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
 (+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and

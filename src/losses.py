@@ -125,6 +125,8 @@ def build_loss_config(name: str, charbonnier_eps: float = 1e-3, ssim_weight: flo
     """Turn CLI loss options into a plain, checkpoint-serializable dict."""
     if name == "l1":
         return {"name": "l1"}
+    if name == "mse":
+        return {"name": "mse"}
     if name == "charbonnier":
         return {"name": "charbonnier", "epsilon": charbonnier_eps}
     if name == "l1_ssim":
@@ -137,6 +139,8 @@ def build_loss(loss_config: dict) -> nn.Module:
     name = loss_config["name"]
     if name == "l1":
         return nn.L1Loss()
+    if name == "mse":
+        return nn.MSELoss()
     if name == "charbonnier":
         return CharbonnierLoss(eps=loss_config["epsilon"])
     if name == "l1_ssim":
@@ -148,6 +152,8 @@ def loss_label(name: str) -> str:
     """Human-readable label for logging (e.g. "Train L1" / "Train Charbonnier")."""
     if name == "l1":
         return "L1"
+    if name == "mse":
+        return "MSE"
     if name == "charbonnier":
         return "Charbonnier"
     if name == "l1_ssim":

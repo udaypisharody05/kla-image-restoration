@@ -255,3 +255,45 @@ def test_build_loss_l1_ssim_constructs_composite_loss_with_configured_weight() -
     loss_fn = build_loss({"name": "l1_ssim", "ssim_weight": 0.3})
     assert isinstance(loss_fn, L1SSIMLoss)
     assert loss_fn.ssim_weight == 0.3
+
+
+# --- MSE loss (Experiment 8: L1 -> MSE) ---
+
+
+def test_mse_computes_mathematically_correct_value() -> None:
+    loss_fn = build_loss({"name": "mse"})
+    prediction = torch.tensor([[0.0, 1.0], [2.0, 3.0]])
+    target = torch.tensor([[1.0, 1.0], [0.0, 5.0]])
+    # errors: 1, 0, 2, 2 -> squared: 1, 0, 4, 4 -> mean = 2.25
+    expected = ((prediction - target) ** 2).mean()
+    assert loss_fn(prediction, target).item() == pytest.approx(expected.item())
+    assert loss_fn(prediction, target).item() == pytest.approx(2.25)
+
+
+def test_mse_identical_prediction_and_target_is_zero() -> None:
+    loss_fn = build_loss({"name": "mse"})
+    image = torch.rand(2, 1, 16, 16)
+    assert loss_fn(image, image.clone()).item() == pytest.approx(0.0, abs=1e-9)
+
+
+def test_mse_is_differentiable_with_finite_gradients() -> None:
+    loss_fn = build_loss({"name": "mse"})
+    prediction = torch.randn(2, 1, 8, 8, requires_grad=True)
+    target = torch.randn(2, 1, 8, 8)
+    loss = loss_fn(prediction, target)
+    loss.backward()
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
+
+
+def test_build_loss_config_mse() -> None:
+    assert build_loss_config("mse") == {"name": "mse"}
+
+
+def test_build_loss_mse_constructs_mse_loss() -> None:
+    loss_fn = build_loss({"name": "mse"})
+    assert isinstance(loss_fn, nn.MSELoss)
+
+
+def test_loss_label_mse() -> None:
+    assert loss_label("mse") == "MSE"

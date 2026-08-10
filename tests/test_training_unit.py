@@ -12,8 +12,10 @@ import pytest
 import torch
 from torch import nn
 
+from evaluate_checkpoint import load_model
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import ImagePair
+from src.losses import loss_label
 from src.models import ResidualSRNet
 from src.transforms import create_training_transform
 from train import (
@@ -717,3 +719,170 @@ def test_checkpoint_stores_experiment_6_crop_size_in_training_config(tmp_path: P
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     assert checkpoint["training_config"]["crop_size"] == 96
     assert checkpoint["model_config"]["scale"] == 2
+
+
+# --- Experiment 8: MSE loss checkpointing and resume ---
+
+
+def test_checkpoint_stores_correct_mse_loss_config(tmp_path: Path) -> None:
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp8_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=10.0,
+        model_config=model_config,
+        training_config={},
+        loss_config={"name": "mse"},
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["loss_config"] == {"name": "mse"}
+
+
+def test_mse_checkpoint_resumes_successfully_with_mse(tmp_path: Path) -> None:
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp8_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=9,
+        best_val_psnr=25.0,
+        model_config=model_config,
+        training_config={},
+        loss_config={"name": "mse"},
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-4)
+    start_epoch, best_val_psnr, _ = load_checkpoint_for_resume(
+        checkpoint_path,
+        resumed_model,
+        resumed_optimizer,
+        model_config,
+        torch.device("cpu"),
+        loss_config={"name": "mse"},
+    )
+    assert start_epoch == 10
+    assert best_val_psnr == 25.0
+
+
+def test_mse_checkpoint_rejects_l1_resume(tmp_path: Path) -> None:
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp8_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=5,
+        best_val_psnr=20.0,
+        model_config=model_config,
+        training_config={},
+        loss_config={"name": "mse"},
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-4)
+    with pytest.raises(ValueError, match="loss_config"):
+        load_checkpoint_for_resume(
+            checkpoint_path,
+            resumed_model,
+            resumed_optimizer,
+            model_config,
+            torch.device("cpu"),
+            loss_config={"name": "l1"},
+        )
+
+
+def test_l1_checkpoint_rejects_mse_resume(tmp_path: Path) -> None:
+    """Uses a real Exp3/Exp6-shaped legacy checkpoint (no loss_config key -> treated as L1)."""
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    legacy_checkpoint_path = tmp_path / "legacy_checkpoint.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": 38,
+            "best_val_psnr": 27.7090,
+            "model_config": model_config,
+            "training_config": {},
+        },
+        legacy_checkpoint_path,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-4)
+    with pytest.raises(ValueError, match="loss_config"):
+        load_checkpoint_for_resume(
+            legacy_checkpoint_path,
+            resumed_model,
+            resumed_optimizer,
+            model_config,
+            torch.device("cpu"),
+            loss_config={"name": "mse"},
+        )
+
+
+def test_mse_checkpoint_rejects_charbonnier_and_l1_ssim_resume(tmp_path: Path) -> None:
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp8_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=5,
+        best_val_psnr=20.0,
+        model_config=model_config,
+        training_config={},
+        loss_config={"name": "mse"},
+    )
+
+    for mismatched_loss_config in (
+        {"name": "charbonnier", "epsilon": 1e-3},
+        {"name": "l1_ssim", "ssim_weight": 0.1},
+    ):
+        resumed_model = ResidualSRNet(**model_config)
+        resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-4)
+        with pytest.raises(ValueError, match="loss_config"):
+            load_checkpoint_for_resume(
+                checkpoint_path,
+                resumed_model,
+                resumed_optimizer,
+                model_config,
+                torch.device("cpu"),
+                loss_config=mismatched_loss_config,
+            )
+
+
+def test_evaluate_checkpoint_load_model_reads_mse_checkpoint(tmp_path: Path) -> None:
+    model_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp8_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=15.0,
+        model_config=model_config,
+        training_config={},
+        loss_config={"name": "mse"},
+    )
+
+    loaded_model, checkpoint = load_model(checkpoint_path, torch.device("cpu"))
+    assert isinstance(loaded_model, ResidualSRNet)
+    assert checkpoint["loss_config"] == {"name": "mse"}
+    assert loss_label(checkpoint["loss_config"]["name"]) == "MSE"

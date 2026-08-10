@@ -130,3 +130,13 @@ over the 23.1413 dB / 0.550604 bicubic baseline).
   (`--crop-size 96`)**, not 64x64 (Experiments 1-5) or the full 128x128 image
   (Experiment 7) — Experiment 6 already captured the benefit of extra crop context;
   going further did not help.
+
+### Next step: Experiment 8 (prepared, not yet run)
+
+`--loss mse` support is implemented, unit-tested, CUDA-sanity-checked, and smoke-tested
+(see `EXPERIMENT_LOG.md`'s Experiment 8 section) but the real 40-epoch run has not been
+started. Planned command (Experiment 6's recipe with MSE substituted for L1):
+
+```bash
+python train.py --data-dir data/Data-public --epochs 40 --batch-size 16 --lr 1e-4 --seed 42 --num-features 64 --num-blocks 8 --loss mse --crop-size 96 --checkpoint-dir checkpoints/exp8_mse --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6
+```
