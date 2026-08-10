@@ -174,3 +174,52 @@ def test_select_test_files_returns_fewer_when_fewer_available(tmp_path: Path) ->
     data_dir = _write_test_layout(tmp_path, count=3)
     selected = select_test_files(data_dir, max_samples=10)
     assert len(selected) == 3
+
+
+# --- Experiment 10: x8 TTA CLI defaults and integration ---
+
+
+def test_infer_test_tta_flag_exists_with_expected_choices() -> None:
+    """Exercises the real argparse parser in infer_test.main() via --help,
+    rather than a hand-built duplicate parser. That the default is actually
+    "none" and behaves identically to omitting the flag is verified directly
+    by test_run_inference_default_tta_none_matches_explicit_none above."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "infer_test.py", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "--tta {none,x8}" in result.stdout
+
+
+def test_run_inference_default_tta_none_matches_explicit_none() -> None:
+    model = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    model.eval()
+    input_tensor = torch.rand(1, 8, 8)
+    torch.manual_seed(0)
+    default_result = run_inference(model, input_tensor, torch.device("cpu"))
+    torch.manual_seed(0)
+    explicit_none_result = run_inference(model, input_tensor, torch.device("cpu"), tta="none")
+    assert np.array_equal(default_result, explicit_none_result)
+
+
+def test_run_inference_x8_produces_correct_shape_and_finite_values() -> None:
+    model = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    input_tensor = torch.rand(1, 8, 8)
+    prediction = run_inference(model, input_tensor, torch.device("cpu"), tta="x8")
+    assert prediction.shape == (16, 16)
+    assert np.isfinite(prediction).all()
+
+
+def test_run_inference_x8_differs_from_single_pass_in_general() -> None:
+    """Not a mathematical requirement, but confirms x8 is actually doing
+    something different from a single forward pass for a typical (non-equivariant)
+    trained-style model, i.e. that the tta branch is really wired in."""
+    torch.manual_seed(1)
+    model = ResidualSRNet(num_features=4, num_blocks=2, scale=2)
+    input_tensor = torch.rand(1, 24, 24)
+    single = run_inference(model, input_tensor, torch.device("cpu"), tta="none")
+    x8 = run_inference(model, input_tensor, torch.device("cpu"), tta="x8")
+    assert not np.allclose(single, x8)

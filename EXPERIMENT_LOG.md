@@ -1316,9 +1316,7 @@ verified identical before and after independent evaluation in this task.
 
 ## Status
 
-**PLANNED / PREPARED.** Architecture implemented, unit-tested, CUDA-sanity-checked,
-and smoke-tested. The real screening/training run has **not** been executed -- no
-results below are real training results.
+**COMPLETED and independently verified.**
 
 ## Hypothesis
 
@@ -1447,18 +1445,195 @@ and its full `model_config`.
   `model_config["architecture"] == "edsr_lite"`; `evaluate_checkpoint.py` and
   `infer_test.py` both correctly reconstructed and ran the checkpoint.
 
-## Checkpoint Directory (for the eventual real run)
+## Checkpoint Directory
 
 ```text
 checkpoints/exp9_edsr_lite/checkpoint_latest.pt
-checkpoints/exp9_edsr_lite/checkpoint_best.pt
+checkpoints/exp9_edsr_lite/checkpoint_best.pt   (epoch 36, best Val PSNR)
 ```
 
 Separate from all prior experiment directories, all of which remain untouched.
 
 ## Result
 
-TBD -- the real Experiment 9 screening/training run has not been started.
+```text
+Best epoch by PSNR: 36
+
+Val L1: 0.033854
+Val PSNR: 27.5658 dB
+Val SSIM: 0.742162
+```
+
+Independently verified using `evaluate_checkpoint.py`:
+
+```bash
+python evaluate_checkpoint.py --checkpoint checkpoints/exp9_edsr_lite/checkpoint_best.pt --data-dir data/Data-public
+```
+
+```text
+Using device: cuda
+Loaded checkpoint checkpoints\exp9_edsr_lite\checkpoint_best.pt (epoch=36, best_val_psnr=27.565757212200424)
+Training loss: L1 ({'name': 'l1'})
+Validation samples: 640
+Val L1 (diagnostic, always L1 regardless of training loss): 0.033854
+Val PSNR: 27.5658 dB
+Val SSIM: 0.742162
+Bicubic PSNR: 23.1413 dB
+Bicubic SSIM: 0.550604
+PSNR vs bicubic: +4.4245 dB
+SSIM vs bicubic: +0.191558
+```
+
+Independently reproduced exactly -- confirms checkpoint loading, model-factory
+reconstruction of EDSRLite, and the validation pipeline all remain correct.
+
+## Comparison vs Experiment 6
+
+| Metric        | Exp 6 (ResidualSRNet, 630,724 params) | Exp 9 (EDSRLite, 1,367,553 params) | Exp 9 vs Exp 6 |
+| ------------- | --------------------------------------: | -------------------------------------: | ---------------: |
+| Val L1        |                                 0.033420 |                                0.033854 |         +0.000434 |
+| Val PSNR      |                               27.7090 dB |                              27.5658 dB |         -0.1432 dB |
+| Val SSIM      |                                 0.745634 |                                0.742162 |          -0.003472 |
+| Best epoch    |                                       38 |                                      36 |                 -- |
+| Parameters    |                                  630,724 |                               1,367,553 |             2.1682x |
+| Epoch time    |                             ~25-27s     |                             ~49-54s     |     ~2x slower    |
+
+## Conclusion
+
+Experiment 9 did **not** improve over Experiment 6 -- PSNR is 0.1432 dB lower and SSIM
+is 0.003472 lower, despite using 2.1682x as many parameters and roughly twice the
+per-epoch training time. The model trained correctly (it reached a comparable
+bicubic-relative improvement, +4.4245 dB, and benefited from scheduler LR reductions
+during training), so this is **not an implementation failure** -- the additional
+depth/capacity of EDSRLite simply did not translate into better validation
+generalization on this ~2,560-sample dataset. **Experiment 6 remains the practical
+champion.** `checkpoints/exp9_edsr_lite/` is retained (not deleted) as a completed,
+non-improving architecture experiment for reproducibility and future reference (e.g.
+as a component in a possible future ensemble). This result argues against simply
+scaling up residual depth/width as the next step; combined with Experiments 4/5/8
+(loss substitutions) also failing to beat Experiment 6, small isolated
+loss/capacity changes to this architecture family appear to have reached a plateau
+around ~27.6-27.7 dB.
+
+---
+
+# Experiment 10 — x8 Geometric Self-Ensemble (Test-Time Augmentation)
+
+## Status
+
+**COMPLETED and measured.** No retraining performed -- this experiment only changes
+how existing checkpoints are evaluated at inference time.
+
+## Objective
+
+Test whether averaging predictions from the 8 dihedral (D4) transforms of each LR
+validation image -- identity, three rotations, and their four flipped
+counterparts -- reduces orientation-specific prediction error and improves
+validation PSNR/SSIM, with zero additional training. Tested on the canonical
+640-image validation set only; the official (GT-less) test set was not used to make
+any decision.
+
+## Implementation
+
+New module `src/tta.py`:
+
+```text
+d4_transforms()       -> the 8 (flip, rotation_k) pairs: {no-flip, h-flip} x {0,90,180,270}
+forward_transform(x, flip, k)  -> flip (if any), then rotate by 90*k degrees
+inverse_transform(y, flip, k)  -> un-rotate by -k, then un-flip (flip is self-inverse)
+predict_x8(model, inputs)      -> mean over the 8 (transform -> model -> inverse-transform)
+                                   raw predictions; never clips before averaging
+```
+
+Each of the 8 transforms was verified to be an exact algebraic inverse of itself
+applied in reverse order (`inverse_transform(forward_transform(x)) == x` bit-for-bit,
+for odd/even/square/rectangular tensors alike), and all 8 are pairwise distinct --
+no accidental duplicates. `predict_x8` works for any `[N,C,H,W]` batch (grayscale,
+batch size > 1, not assumed square), always in `torch.inference_mode()`, and restores
+the model's original `training`/`eval` mode on exit.
+
+**Raw-averaging order preserved as specified:** individual per-transform predictions
+are stacked and averaged *before* any clipping; clipping (when it happens at all)
+occurs only inside the existing `src.metrics.psnr`/`ssim` (their default
+`clip_prediction=True`, unchanged) when scoring the already-averaged result --
+verified directly by a unit test using a constant-valued mock model whose raw output
+(2.0, outside `[0,1]`) survives `predict_x8` unclipped.
+
+`evaluate_checkpoint.py` gains `--tta {none,x8}` (default `none`) and a new
+`validate_x8()` function mirroring `train.validate()`'s exact aggregation but scoring
+`predict_x8`'s output; `--tta none` calls the pre-existing `validate()` unchanged, so
+default behavior is byte-for-byte identical to before TTA existed. `infer_test.py`
+gains the same `--tta {none,x8}` flag on `run_inference()`, with identical
+default-preserving behavior; output filenames, ordering, dtype, and directory
+structure are all unchanged. No second PSNR/SSIM implementation was introduced --
+both paths call the same `src.metrics.psnr`/`ssim`.
+
+## CUDA Sanity Check
+
+`checkpoints/exp6_crop96/checkpoint_best.pt`, batch of 4 validation-sized
+`[4,1,128,128]` inputs, on the RTX 4060 Laptop GPU:
+
+```text
+Normal:  output [4,1,256,256], finite, ~10.48 ms/call (warmed-up average of 10)
+x8 TTA:  output [4,1,256,256], finite, ~83.81 ms/call (warmed-up average of 10)
+Compute-only ratio: ~8.00x (expected -- 8 forward passes vs 1)
+Peak allocated: ~100.30 MiB / peak reserved: ~114.00 MiB -- no OOM
+```
+
+## Full 640-Image Validation Comparison
+
+### Experiment 6 (ResidualSRNet, 64F/8B, 630,724 params)
+
+```bash
+python evaluate_checkpoint.py --checkpoint checkpoints/exp6_crop96/checkpoint_best.pt --data-dir data/Data-public --tta none
+python evaluate_checkpoint.py --checkpoint checkpoints/exp6_crop96/checkpoint_best.pt --data-dir data/Data-public --tta x8
+```
+
+| Metric        |     Normal |         x8 |     Delta |
+| ------------- | ---------: | ---------: | --------: |
+| Val L1        |   0.033420 |   0.033176 | -0.000244 |
+| Val PSNR      | 27.7090 dB | 27.7689 dB | +0.0599 dB |
+| Val SSIM      |   0.745634 |   0.747955 | +0.002321 |
+| Wall time     |    16.806s |    33.195s |    ~1.98x |
+
+### Experiment 9 (EDSRLite, 64F/16B, 1,367,553 params)
+
+```bash
+python evaluate_checkpoint.py --checkpoint checkpoints/exp9_edsr_lite/checkpoint_best.pt --data-dir data/Data-public --tta none
+python evaluate_checkpoint.py --checkpoint checkpoints/exp9_edsr_lite/checkpoint_best.pt --data-dir data/Data-public --tta x8
+```
+
+| Metric        |     Normal |         x8 |     Delta |
+| ------------- | ---------: | ---------: | --------: |
+| Val L1        |   0.033854 |   0.033766 | -0.000088 |
+| Val PSNR      | 27.5658 dB | 27.5875 dB | +0.0217 dB |
+| Val SSIM      |   0.742162 |   0.742980 | +0.000818 |
+| Wall time     |    19.929s |    58.406s |    ~2.93x |
+
+(End-to-end script wall-time ratios are lower than the ~8x compute-only ratio above
+because a large, roughly-fixed fraction of each run -- dataset discovery, checkpoint
+loading, CUDA initialization -- doesn't scale with the number of forward passes.)
+
+## Conclusion
+
+x8 geometric self-ensembling produced a **reproducible improvement in both PSNR and
+SSIM, with no regression, on both checkpoints tested** -- exactly the success
+criterion this experiment specified. Experiment 6 gained **+0.0599 dB PSNR** and
+**+0.002321 SSIM**, comfortably inside the "even +0.03 to +0.10 dB could be useful"
+range called out in advance (and well below the often-cited +0.2 to +0.5 dB, as
+expected -- that figure was not assumed and was not observed). Experiment 9 gained a
+smaller but still positive **+0.0217 dB PSNR** and **+0.000818 SSIM**. Neither
+model's L1 diagnostic regressed. The cost is purely computational (~8x inference
+compute, ~2-3x wall time on a small 640-image validation run) and requires no
+retraining, no architecture change, and no change to checkpoint-selection criteria.
+
+**Decision: x8 TTA is worth retaining as an optional inference-time technique**,
+particularly for Experiment 6 where the gain is clearest. It does not change which
+checkpoint is the "champion" (that remains determined by normal validation PSNR, per
+the project's established checkpoint-selection convention) -- it is an *optional
+inference-time post-processing step* available via `--tta x8` on top of whichever
+checkpoint is already selected, not a replacement for model selection or further
+training.
 
 ---
 
@@ -1494,7 +1669,13 @@ above, which remains the only quantitative comparison in this log.
 | Exp 6 — Larger crop      | 64x64 -> 96x96 LR crop                |     27.7090 dB |      0.745634 | Complete |
 | Exp 7 — Full-image crop  | 96x96 -> 128x128 (full image) LR crop | **27.7101 dB** |      0.743748 | Complete |
 | Exp 8 — MSE loss         | L1 -> MSE, stopped after 15-epoch screen |    27.2159 dB |      0.727473 | Complete |
-| Exp 9 — EDSR-lite arch   | ResidualSRNet -> EDSRLite (64F/16B, 1.37M params) |    TBD |     TBD | Planned  |
+| Exp 9 — EDSR-lite arch   | ResidualSRNet -> EDSRLite (64F/16B, 1.37M params) | 27.5658 dB | 0.742162 | Complete |
+| Exp 10 — x8 geometric TTA | Inference-only self-ensemble on Exp 6 checkpoint | **27.7689 dB** | **0.747955** | Complete |
+
+Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
+x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an
+optional inference-time post-processing step, not a new checkpoint-selection
+candidate; Experiment 6's checkpoint remains the underlying "champion" model.
 
 Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
 (+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and

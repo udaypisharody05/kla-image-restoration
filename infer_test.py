@@ -36,6 +36,7 @@ from inspect_dataset import configured_data_dir
 from src.baseline import bicubic_upscale
 from src.dataset import RestorationTestDataset
 from src.dataset_discovery import discover_layout, image_files
+from src.tta import predict_x8
 from train import select_device
 
 
@@ -54,17 +55,28 @@ def select_test_files(data_dir: Path, max_samples: int) -> list[Path]:
     return files[:max_samples]
 
 
-def run_inference(model: torch.nn.Module, input_tensor: torch.Tensor, device: torch.device) -> np.ndarray:
+def run_inference(
+    model: torch.nn.Module,
+    input_tensor: torch.Tensor,
+    device: torch.device,
+    tta: str = "none",
+) -> np.ndarray:
     """Run the model on one full-resolution ``[1,H,W]`` LR tensor.
 
     Returns the raw (unclipped) float32 ``[2H,2W]`` prediction as a numpy
     array. Model output is not altered in any way before this point (no
     clipping, no sigmoid/tanh, no cropping) -- only converted to numpy.
+    ``tta="none"`` (the default) is byte-for-byte the original single-pass
+    behavior; ``tta="x8"`` averages the 8-way geometric self-ensemble instead
+    (see ``src/tta.py``), same raw-prediction convention either way.
     """
     model.eval()
-    with torch.inference_mode():
-        batch = input_tensor.unsqueeze(0).to(device)  # [1,1,H,W]
-        output = model(batch)
+    batch = input_tensor.unsqueeze(0).to(device)  # [1,1,H,W]
+    if tta == "x8":
+        output = predict_x8(model, batch)
+    else:
+        with torch.inference_mode():
+            output = model(batch)
     return output[0, 0].detach().cpu().numpy().astype(np.float32)
 
 
@@ -170,6 +182,13 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("results/test_sanity_exp6"))
     parser.add_argument("--max-samples", type=int, default=10)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument(
+        "--tta",
+        type=str,
+        choices=["none", "x8"],
+        default="none",
+        help="Test-time augmentation. 'none' (default) is byte-for-byte the original behavior.",
+    )
     args = parser.parse_args()
     if args.max_samples < 1:
         parser.error("--max-samples must be positive")
@@ -183,6 +202,7 @@ def main() -> None:
         f"(epoch={checkpoint.get('epoch')}, best_val_psnr={checkpoint.get('best_val_psnr')})"
     )
     print(f"Model config: {checkpoint['model_config']}")
+    print(f"TTA: {'x8 geometric self-ensemble' if args.tta == 'x8' else 'disabled'}")
     scale = checkpoint["model_config"]["scale"]
 
     test_files = select_test_files(args.data_dir, args.max_samples)
@@ -209,7 +229,7 @@ def main() -> None:
         input_height, input_width = input_tensor.shape[-2:]
         expected_shape = (input_height * scale, input_width * scale)
 
-        raw_prediction = run_inference(model, input_tensor, device)
+        raw_prediction = run_inference(model, input_tensor, device, args.tta)
         validate_prediction_before_saving(raw_prediction, expected_shape, filename)
 
         noisy_lr = input_tensor[0].numpy()

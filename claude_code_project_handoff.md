@@ -142,25 +142,37 @@ since the gap was already decisive. **L1 remains the preferred reconstruction lo
 Experiments 4 (Charbonnier), 5 (L1+SSIM), and 8 (MSE) have now all been tried against L1
 without beating Experiment 6 on PSNR.
 
-### Experiment 9 (prepared, not yet run) — EDSR-lite architecture
+### Experiment 9 (completed — negative result; EDSR-lite architecture)
 
-With loss-function substitution (Experiments 4, 5, 8) exhausted without a PSNR win, the
-next research direction is **architecture improvement**. `EDSRLite`
-(`src/models/edsr_lite.py`) is a new, separate architecture -- `ResidualSRNet` is
-completely untouched, so Experiments 1-8's checkpoints remain fully compatible. Chosen
-Experiment 9 config: 64 features, 16 residual blocks, fixed residual scale 0.1,
-**1,367,553 parameters (2.1682x the 630,724-parameter champion)**. Implemented,
-unit-tested, CUDA-sanity-checked (fits comfortably in ~8GB VRAM at batch 16, no OOM),
-and smoke-tested (see `EXPERIMENT_LOG.md`'s Experiment 9 section), but the real
-screening run has not been started. A centralized model factory
+`EDSRLite` (`src/models/edsr_lite.py`, a new architecture -- `ResidualSRNet` is
+untouched) was trained with Experiment 6's exact recipe substituted onto a stronger
+64-feature/16-block/1,367,553-parameter (2.1682x) EDSR-style network. Independently
+verified (`checkpoints/exp9_edsr_lite/checkpoint_best.pt`, epoch 36): Val PSNR
+27.5658 dB, Val SSIM 0.742162 -- **0.1432 dB lower and 0.003472 lower** than
+Experiment 6, despite 2.17x the parameters and ~2x the epoch time. The model trained
+correctly (no implementation failure); the extra depth/capacity simply didn't help
+generalization on this dataset size. The checkpoint is retained for reproducibility.
+**Experiment 6 remains the practical champion.** A centralized model factory
 (`src.models.build_model_config`/`build_model`) now backs `train.py`,
 `evaluate_checkpoint.py`, and `infer_test.py` so both architectures share one
-reconstruction path. Planned command (Experiment 6's recipe with EDSRLite substituted
-for ResidualSRNet):
+reconstruction path -- useful infrastructure kept regardless of this result.
 
-```bash
-python train.py --data-dir data/Data-public --epochs 40 --batch-size 16 --lr 1e-4 --seed 42 --model edsr_lite --num-features 64 --num-blocks 16 --residual-scale 0.1 --loss l1 --crop-size 96 --checkpoint-dir checkpoints/exp9_edsr_lite --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6
-```
+### Experiment 10 (completed — small measured win; x8 geometric TTA)
 
-Experiment 6 (`checkpoints/exp6_crop96/checkpoint_best.pt`, L1, 96x96 crop) remains the
-baseline to beat: Val PSNR 27.7090 dB, Val SSIM 0.745634.
+With both loss substitution (Experiments 4, 5, 8) and architecture scaling
+(Experiment 9) failing to beat Experiment 6 on retraining, Experiment 10 tested a
+**no-retraining, inference-time** technique instead: x8 geometric self-ensembling
+(`src/tta.py::predict_x8`, `--tta x8` on `evaluate_checkpoint.py`/`infer_test.py`).
+Measured on the full 640-image validation set: Experiment 6 improved from
+27.7090 dB / 0.745634 to **27.7689 dB / 0.747955** (+0.0599 dB, +0.002321 SSIM);
+Experiment 9 improved similarly but more modestly (+0.0217 dB, +0.000818 SSIM). Both
+gains are real and reproducible, with no SSIM regression, at the cost of ~8x
+inference compute (no training cost). **x8 TTA is a worthwhile optional inference
+step on top of Experiment 6's checkpoint**, not a replacement for it -- the
+underlying champion checkpoint is unchanged. Use `--tta x8` when generating final
+predictions if the ~8x inference cost is acceptable; use `--tta none` (default) for
+fast iteration/screening.
+
+Experiment 6 (`checkpoints/exp6_crop96/checkpoint_best.pt`, L1, 96x96 crop) remains
+the underlying champion checkpoint: Val PSNR 27.7090 dB, Val SSIM 0.745634 (normal),
+27.7689 dB / 0.747955 with `--tta x8`.

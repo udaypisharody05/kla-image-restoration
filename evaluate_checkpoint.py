@@ -22,9 +22,46 @@ from inspect_dataset import configured_data_dir
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import discover_layout, discover_pairs
 from src.losses import loss_label
+from src.metrics import psnr, ssim
 from src.models import build_model
 from src.splits import split_pairs
+from src.tta import predict_x8
 from train import BICUBIC_PSNR_DB, BICUBIC_SSIM, select_device, validate
+
+
+@torch.no_grad()
+def validate_x8(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    loss_fn: nn.Module,
+    device: torch.device,
+) -> dict[str, float]:
+    """Same metric conventions/aggregation as ``train.validate``, but scores the
+    x8 geometric self-ensemble average instead of a single forward pass.
+
+    Uses the exact same ``src.metrics.psnr``/``ssim`` (which clip only the
+    prediction, by default) -- no second metric implementation. The averaged
+    prediction from ``predict_x8`` is raw/unclipped; clipping (if any) happens
+    inside ``psnr``/``ssim`` themselves, identically to the no-TTA path.
+    """
+    model.eval()
+    total_loss = total_psnr = total_ssim = 0.0
+    total_count = 0
+    for batch in loader:
+        inputs = batch["input"].to(device)
+        targets = batch["target"].to(device)
+        outputs = predict_x8(model, inputs)
+        loss = loss_fn(outputs, targets)
+        batch_size = inputs.shape[0]
+        total_loss += loss.item() * batch_size
+        total_psnr += psnr(outputs, targets) * batch_size
+        total_ssim += ssim(outputs, targets) * batch_size
+        total_count += batch_size
+    return {
+        "loss": total_loss / total_count,
+        "psnr": total_psnr / total_count,
+        "ssim": total_ssim / total_count,
+    }
 
 
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[nn.Module, dict]:
@@ -49,6 +86,13 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None, help="Optional subset limit")
+    parser.add_argument(
+        "--tta",
+        type=str,
+        choices=["none", "x8"],
+        default="none",
+        help="Test-time augmentation. 'none' (default) is byte-for-byte the original evaluation.",
+    )
     args = parser.parse_args()
 
     device = select_device(args.device)
@@ -75,10 +119,20 @@ def main() -> None:
         validation_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
 
+    if args.tta == "x8":
+        print("TTA: x8 geometric self-ensemble enabled (8 D4 transforms, raw-prediction averaging)")
+    else:
+        print("TTA: disabled")
+
     # Always score with real L1 here (independent of loss_config above), so
     # this number stays directly comparable across every experiment even when
-    # training losses differ.
-    metrics = validate(model, validation_loader, nn.L1Loss(), device)
+    # training losses differ. --tta none takes the exact original code path
+    # (train.validate), unchanged, so default behavior stays byte-for-byte
+    # identical to before TTA support existed.
+    if args.tta == "x8":
+        metrics = validate_x8(model, validation_loader, nn.L1Loss(), device)
+    else:
+        metrics = validate(model, validation_loader, nn.L1Loss(), device)
 
     print(f"Validation samples: {len(validation_dataset)}")
     print(f"Val L1 (diagnostic, always L1 regardless of training loss): {metrics['loss']:.6f}")
