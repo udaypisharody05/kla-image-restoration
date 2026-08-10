@@ -16,7 +16,7 @@ from evaluate_checkpoint import load_model
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import ImagePair
 from src.losses import loss_label
-from src.models import ResidualSRNet
+from src.models import EDSRLite, ResidualSRNet, build_model_config
 from src.transforms import create_training_transform
 from train import (
     build_datasets,
@@ -886,3 +886,163 @@ def test_evaluate_checkpoint_load_model_reads_mse_checkpoint(tmp_path: Path) -> 
     assert isinstance(loaded_model, ResidualSRNet)
     assert checkpoint["loss_config"] == {"name": "mse"}
     assert loss_label(checkpoint["loss_config"]["name"]) == "MSE"
+
+
+# --- Experiment 9: EDSRLite architecture checkpointing and resume compatibility ---
+
+
+def _tiny_edsr_lite_config() -> dict:
+    return build_model_config(
+        "edsr_lite", num_features=4, num_blocks=1, scale=2, residual_scale=0.1
+    )
+
+
+def test_edsr_lite_checkpoint_stores_architecture_identifier(tmp_path: Path) -> None:
+    model_config = _tiny_edsr_lite_config()
+    model = EDSRLite(
+        in_channels=1, out_channels=1, num_features=4, num_blocks=1, scale=2, residual_scale=0.1
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp9_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=10.0,
+        model_config=model_config,
+        training_config={},
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["model_config"]["architecture"] == "edsr_lite"
+    assert checkpoint["model_config"]["residual_scale"] == 0.1
+
+
+def test_matching_edsr_lite_resume_succeeds(tmp_path: Path) -> None:
+    model_config = _tiny_edsr_lite_config()
+    model = EDSRLite(
+        in_channels=1, out_channels=1, num_features=4, num_blocks=1, scale=2, residual_scale=0.1
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp9_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=7,
+        best_val_psnr=22.0,
+        model_config=model_config,
+        training_config={},
+    )
+
+    resumed_model = EDSRLite(
+        in_channels=1, out_channels=1, num_features=4, num_blocks=1, scale=2, residual_scale=0.1
+    )
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-4)
+    start_epoch, best_val_psnr, _ = load_checkpoint_for_resume(
+        checkpoint_path, resumed_model, resumed_optimizer, model_config, torch.device("cpu")
+    )
+    assert start_epoch == 8
+    assert best_val_psnr == 22.0
+    for (name, original), (_, restored) in zip(
+        model.named_parameters(), resumed_model.named_parameters()
+    ):
+        assert torch.equal(original, restored), name
+
+
+def test_residual_sr_checkpoint_rejects_edsr_lite_resume(tmp_path: Path) -> None:
+    """Real Exp1-8-shaped checkpoint (ResidualSRNet, no architecture key) must
+    reject a --model edsr_lite resume attempt."""
+    residual_sr_config = _exp3_capacity_model_config()
+    model = ResidualSRNet(**residual_sr_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp6_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=38,
+        best_val_psnr=27.7090,
+        model_config=residual_sr_config,
+        training_config={},
+    )
+
+    edsr_lite_config = build_model_config(
+        "edsr_lite",
+        num_features=residual_sr_config["num_features"],
+        num_blocks=residual_sr_config["num_blocks"],
+        scale=residual_sr_config["scale"],
+        residual_scale=0.1,
+    )
+    edsr_model = EDSRLite(
+        num_features=residual_sr_config["num_features"],
+        num_blocks=residual_sr_config["num_blocks"],
+        scale=residual_sr_config["scale"],
+        residual_scale=0.1,
+    )
+    edsr_optimizer = torch.optim.Adam(edsr_model.parameters(), lr=1e-4)
+    with pytest.raises(ValueError, match="model_config"):
+        load_checkpoint_for_resume(
+            checkpoint_path, edsr_model, edsr_optimizer, edsr_lite_config, torch.device("cpu")
+        )
+
+
+def test_edsr_lite_checkpoint_rejects_residual_sr_resume(tmp_path: Path) -> None:
+    edsr_lite_config = _tiny_edsr_lite_config()
+    model = EDSRLite(
+        in_channels=1, out_channels=1, num_features=4, num_blocks=1, scale=2, residual_scale=0.1
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp9_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=5,
+        best_val_psnr=20.0,
+        model_config=edsr_lite_config,
+        training_config={},
+    )
+
+    residual_sr_config = {
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 4,
+        "num_blocks": 1,
+        "scale": 2,
+    }
+    residual_model = ResidualSRNet(**residual_sr_config)
+    residual_optimizer = torch.optim.Adam(residual_model.parameters(), lr=1e-4)
+    with pytest.raises(ValueError, match="model_config"):
+        load_checkpoint_for_resume(
+            checkpoint_path,
+            residual_model,
+            residual_optimizer,
+            residual_sr_config,
+            torch.device("cpu"),
+        )
+
+
+def test_evaluate_checkpoint_load_model_reconstructs_edsr_lite(tmp_path: Path) -> None:
+    """Covers both evaluate_checkpoint.py and infer_test.py, which reuses load_model()."""
+    model_config = _tiny_edsr_lite_config()
+    model = EDSRLite(
+        in_channels=1, out_channels=1, num_features=4, num_blocks=1, scale=2, residual_scale=0.1
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    checkpoint_path = tmp_path / "exp9_checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=15.0,
+        model_config=model_config,
+        training_config={},
+    )
+
+    loaded_model, checkpoint = load_model(checkpoint_path, torch.device("cpu"))
+    assert isinstance(loaded_model, EDSRLite)
+    assert checkpoint["model_config"]["architecture"] == "edsr_lite"
+    output = loaded_model(torch.randn(1, 1, 16, 16))
+    assert output.shape == (1, 1, 32, 32)

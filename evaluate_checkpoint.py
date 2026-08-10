@@ -22,14 +22,18 @@ from inspect_dataset import configured_data_dir
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import discover_layout, discover_pairs
 from src.losses import loss_label
-from src.models import ResidualSRNet
+from src.models import build_model
 from src.splits import split_pairs
 from train import BICUBIC_PSNR_DB, BICUBIC_SSIM, select_device, validate
 
 
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[nn.Module, dict]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model = ResidualSRNet(**checkpoint["model_config"]).to(device)
+    # build_model() reads model_config["architecture"] (missing -> ResidualSRNet,
+    # the only interpretation every Experiment 1-8 checkpoint ever used), so
+    # this one call reconstructs both historical and EDSRLite checkpoints --
+    # infer_test.py reuses this same function and needs no changes either.
+    model = build_model(checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model, checkpoint

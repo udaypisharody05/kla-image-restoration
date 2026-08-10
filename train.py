@@ -26,7 +26,7 @@ from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import discover_layout, discover_pairs
 from src.losses import build_loss, build_loss_config, loss_label
 from src.metrics import psnr, ssim
-from src.models import ResidualSRNet
+from src.models import build_model, build_model_config
 from src.splits import split_pairs
 from src.thermal import GpuTemperatureGuard
 from src.transforms import create_training_transform
@@ -198,7 +198,7 @@ def load_checkpoint_for_resume(
         raise ValueError(
             f"Checkpoint model_config {checkpoint['model_config']} does not match "
             f"the requested model_config {model_config}; pass matching "
-            "--num-features/--num-blocks/--scale to resume."
+            "--model/--num-features/--num-blocks/--scale/--residual-scale to resume."
         )
     if loss_config is not None:
         # Checkpoints saved before loss selection existed have no stored
@@ -315,6 +315,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crop-size", type=int, default=64)
     parser.add_argument("--num-features", type=int, default=32, help="Residual block channel width")
     parser.add_argument("--num-blocks", type=int, default=4, help="Number of residual blocks")
+    parser.add_argument(
+        "--model",
+        type=str,
+        choices=["residual_sr", "edsr_lite"],
+        default="residual_sr",
+        help="Architecture. 'residual_sr' (default) reproduces Experiments 1-8 exactly.",
+    )
+    parser.add_argument(
+        "--residual-scale",
+        type=float,
+        default=0.1,
+        help="EDSR-style fixed residual-block scale (ignored unless --model edsr_lite)",
+    )
     parser.add_argument("--device", type=str, default=None, help="cuda or cpu; default auto-detects")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--num-workers", type=int, default=0)
@@ -453,14 +466,19 @@ def main() -> None:
         num_workers=args.num_workers,
     )
 
-    model_config = {
-        "in_channels": 1,
-        "out_channels": 1,
-        "num_features": args.num_features,
-        "num_blocks": args.num_blocks,
-        "scale": args.scale,
-    }
-    model = ResidualSRNet(**model_config).to(device)
+    model_config = build_model_config(
+        args.model,
+        in_channels=1,
+        out_channels=1,
+        num_features=args.num_features,
+        num_blocks=args.num_blocks,
+        scale=args.scale,
+        residual_scale=args.residual_scale,
+    )
+    model = build_model(model_config).to(device)
+    param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model: {args.model} ({param_count:,} trainable parameters)")
+    print(f"Model config: {model_config}")
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     loss_config = build_loss_config(args.loss, args.charbonnier_eps, args.ssim_weight)

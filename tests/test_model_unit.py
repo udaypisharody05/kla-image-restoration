@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.models import ResidualSRNet
+from src.models import EDSRLite, ResidualSRNet, build_model, build_model_config
 
 
 @pytest.mark.parametrize(
@@ -94,3 +94,86 @@ def test_different_capacity_configs_produce_different_param_counts() -> None:
     assert exp2_params == 84_708
     assert exp3_params == 630_724
     assert exp3_params > exp2_params
+
+
+# --- Experiment 9: model factory (build_model_config/build_model) ---
+
+
+def test_residual_sr_config_omits_architecture_key_for_legacy_compatibility() -> None:
+    """Historical model_config (Exp 1-8) never had an "architecture" key; the
+    factory must reproduce that exact shape for residual_sr so old-vs-new
+    dict-equality resume checks keep working with no special-casing."""
+    config = build_model_config("residual_sr", num_features=64, num_blocks=8, scale=2)
+    assert "architecture" not in config
+    assert config == {
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 64,
+        "num_blocks": 8,
+        "scale": 2,
+    }
+
+
+def test_edsr_lite_config_includes_architecture_and_residual_scale() -> None:
+    config = build_model_config(
+        "edsr_lite", num_features=64, num_blocks=16, scale=2, residual_scale=0.1
+    )
+    assert config == {
+        "architecture": "edsr_lite",
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 64,
+        "num_blocks": 16,
+        "scale": 2,
+        "residual_scale": 0.1,
+    }
+
+
+def test_build_model_reconstructs_residual_sr() -> None:
+    config = build_model_config("residual_sr", num_features=8, num_blocks=2, scale=2)
+    model = build_model(config)
+    assert isinstance(model, ResidualSRNet)
+    output = model(torch.randn(1, 1, 16, 16))
+    assert output.shape == (1, 1, 32, 32)
+
+
+def test_build_model_reconstructs_edsr_lite() -> None:
+    config = build_model_config(
+        "edsr_lite", num_features=8, num_blocks=2, scale=2, residual_scale=0.1
+    )
+    model = build_model(config)
+    assert isinstance(model, EDSRLite)
+    output = model(torch.randn(1, 1, 16, 16))
+    assert output.shape == (1, 1, 32, 32)
+
+
+def test_build_model_rejects_unknown_architecture() -> None:
+    with pytest.raises(ValueError, match="Unknown architecture"):
+        build_model({"architecture": "transformer_sr", "in_channels": 1})
+
+
+def test_legacy_checkpoint_model_config_without_architecture_key_loads_as_residual_sr() -> None:
+    """Simulates a real Exp1-8 checkpoint's model_config verbatim."""
+    legacy_config = {
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 64,
+        "num_blocks": 8,
+        "scale": 2,
+    }
+    model = build_model(legacy_config)
+    assert isinstance(model, ResidualSRNet)
+
+
+def test_experiment_6_style_model_config_still_works_through_factory() -> None:
+    """Experiment 6's exact real model_config, reconstructed through build_model."""
+    exp6_config = {
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 64,
+        "num_blocks": 8,
+        "scale": 2,
+    }
+    model = build_model(exp6_config)
+    assert isinstance(model, ResidualSRNet)
+    assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 630_724

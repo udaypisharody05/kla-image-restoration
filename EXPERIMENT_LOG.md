@@ -1312,6 +1312,156 @@ verified identical before and after independent evaluation in this task.
 
 ---
 
+# Experiment 9 — EDSR-lite Architecture
+
+## Status
+
+**PLANNED / PREPARED.** Architecture implemented, unit-tested, CUDA-sanity-checked,
+and smoke-tested. The real screening/training run has **not** been executed -- no
+results below are real training results.
+
+## Hypothesis
+
+Experiments 4, 5, and 8 all tried substituting the reconstruction loss (Charbonnier,
+L1+SSIM, MSE) against Experiment 6's L1 baseline without beating it on PSNR. This
+suggests the ~27.7 dB plateau may be a **model-capacity/architecture** limit rather
+than a loss-function one. Experiment 9 tests that by introducing a stronger,
+EDSR-style architecture (`EDSRLite`) while keeping Experiment 6's entire training
+recipe (loss, crop, batch size, seed, optimizer, scheduler) unchanged, so any PSNR
+change can be attributed to architecture alone.
+
+## Chosen Architecture: EDSRLite
+
+Implemented as a **new** model (`src/models/edsr_lite.py`) rather than modifying
+`ResidualSRNet` in place -- `ResidualSRNet` is completely untouched, so Experiments
+1-8's checkpoints remain fully compatible and reproducible.
+
+```text
+Noisy LR
+  -> 3x3 conv (in_channels -> num_features)
+  -> num_blocks x EDSRResidualBlock:
+       Conv3x3 -> ReLU -> Conv3x3, added back as: x + residual_scale * residual
+       (no BatchNorm anywhere in the model)
+  -> 3x3 conv ("conv_after_body")
+  -> + long/global residual connection back to the post-conv_in features
+  -> 3x3 conv (num_features -> num_features * scale^2) -> PixelShuffle(scale)
+  -> 3x3 reconstruction conv (num_features -> out_channels)
+  -> restored grayscale output
+```
+
+Unlike `ResidualSRNet` (which fuses upsampling and reconstruction into a single
+conv+PixelShuffle step), EDSRLite keeps a separate feature-space upsample and a
+dedicated image-space reconstruction convolution, matching classical EDSR (Lim et
+al., 2017) structure. No attention, no transformers, no GAN components, no
+pretrained weights -- channel attention is explicitly deferred to a later,
+separate experiment per the task brief.
+
+## Experiment 9 Configuration
+
+```text
+Architecture:       edsr_lite
+Feature channels:   64
+Residual blocks:    16
+Residual scale:     0.1 (fixed constant, not trainable)
+Scale:              2
+Parameters:         1,367,553 (verified by direct instantiation)
+Ratio vs ResidualSRNet champion (630,724): 2.1682x
+```
+
+Why this configuration: 64 features keeps the same width as the Experiment 6 champion
+(isolating "depth + EDSR design" as the tested change rather than also changing
+width), while doubling the residual-block count (8 -> 16) meaningfully increases
+capacity and receptive field. This lands at ~1.37M parameters -- solidly inside the
+task's suggested 1-3M "reasonable" region, roughly 2.2x the current champion, without
+approaching a research-scale EDSR (32 blocks x 256 features, ~43M parameters). A
+CUDA sanity check (below) confirmed this fits comfortably in the RTX 4060 Laptop
+GPU's ~8GB VRAM at the full batch size of 16, and a short runtime measurement
+estimated a full 40-epoch run at roughly 25-35 minutes -- practical for this
+dataset/hardware, not requiring an architecture search or a larger model.
+
+Training recipe (unchanged from Experiment 6):
+
+```text
+Loss:               L1Loss
+Optimizer:          Adam
+Initial LR:         1e-4
+Scheduler:          ReduceLROnPlateau (mode=max, factor=0.5, patience=3, min_lr=1e-6)
+Batch size:         16
+Seed:               42
+Training crop:      LR 96x96 / GT 192x192
+Validation:         full images, unchanged
+Train samples:      2560
+Validation samples: 640
+```
+
+## Implementation
+
+`src/models/__init__.py` adds a centralized model factory,
+`build_model_config`/`build_model`, mirroring `src/losses.py`'s existing
+`build_loss_config`/`build_loss` pattern -- `train.py`, `evaluate_checkpoint.py`,
+and `infer_test.py` (via `evaluate_checkpoint.load_model`) now share one
+reconstruction path instead of duplicating `ResidualSRNet(**model_config)`.
+
+**Critical backward-compatibility detail:** `build_model_config("residual_sr", ...)`
+deliberately **omits** an `"architecture"` key, producing a dict byte-identical to
+every historical checkpoint's `model_config` (Experiments 1-8 never had this key).
+Only `"edsr_lite"` configs carry `"architecture": "edsr_lite"`. This means the
+*existing* `model_config` dict-equality check in `load_checkpoint_for_resume`
+correctly rejects architecture mismatches in both directions with **zero new
+comparison logic** -- an EDSRLite config can never equal a ResidualSRNet config
+(different key sets), and `build_model()` treats a missing `"architecture"` key as
+`ResidualSRNet`, exactly matching what every historical checkpoint actually is.
+Verified live in both directions (see Verification Performed below).
+
+`train.py` gains `--model {residual_sr,edsr_lite}` (default `residual_sr`, so every
+prior experiment's command stays exactly reproducible with no flag) and
+`--residual-scale` (default `0.1`, ignored unless `--model edsr_lite`). Training
+startup now prints the selected architecture, its exact trainable parameter count,
+and its full `model_config`.
+
+## Verification Performed (infrastructure only, not training results)
+
+- Unit tests: grayscale input, exact 2x output shape across multiple spatial sizes,
+  exact parameter count for the Experiment 9 configuration, no BatchNorm anywhere,
+  residual-block structure and exact formula match (`x + residual_scale * residual`,
+  including a `residual_scale=0` identity edge case), finite forward output, finite
+  backward gradients, model-factory reconstruction of both architectures, legacy
+  (no-`"architecture"`-key) configs still load as `ResidualSRNet`, matching-config
+  EDSRLite resume succeeds, cross-architecture resume rejected in both directions
+  (verified against a real Experiment-6-shaped legacy checkpoint), and
+  `evaluate_checkpoint.load_model` (shared by `infer_test.py`) reconstructs an
+  EDSRLite checkpoint correctly.
+- CUDA sanity: `[16,1,96,96]` -> `[16,1,192,192]` on the RTX 4060 Laptop GPU with the
+  exact Experiment 9 config, L1 loss, forward/backward/optimizer step all succeeded,
+  finite throughout, no OOM. Peak allocated ~1679 MiB / peak reserved ~2190 MiB of
+  ~8188 MiB total (~26.75% utilization) -- comfortably fits at the full batch size of
+  16 (not reduced).
+- Runtime sanity: ~229 ms/batch measured over 20 iterations after warmup ->
+  estimated ~37s/epoch (train-only, 160 batches) -> roughly 25-35 minutes for a full
+  40-epoch run including validation -- practical for this experiment.
+- Real-data smoke run (`checkpoints/exp9_edsr_smoke/`, deleted afterward -- **not**
+  `checkpoints/exp9_edsr_lite/`): 32 train / 16 val samples, `--model edsr_lite
+  --num-features 64 --num-blocks 16 --residual-scale 0.1 --loss l1 --crop-size 96
+  --seed 42`, same scheduler as Experiment 6. Training/validation/checkpointing/
+  resume all worked; checkpoint correctly stored
+  `model_config["architecture"] == "edsr_lite"`; `evaluate_checkpoint.py` and
+  `infer_test.py` both correctly reconstructed and ran the checkpoint.
+
+## Checkpoint Directory (for the eventual real run)
+
+```text
+checkpoints/exp9_edsr_lite/checkpoint_latest.pt
+checkpoints/exp9_edsr_lite/checkpoint_best.pt
+```
+
+Separate from all prior experiment directories, all of which remain untouched.
+
+## Result
+
+TBD -- the real Experiment 9 screening/training run has not been started.
+
+---
+
 # Official Test-Set Inference Sanity Check (infrastructure, not a new experiment)
 
 After independently verifying Experiment 6, a small inference sanity check was run
@@ -1344,6 +1494,7 @@ above, which remains the only quantitative comparison in this log.
 | Exp 6 — Larger crop      | 64x64 -> 96x96 LR crop                |     27.7090 dB |      0.745634 | Complete |
 | Exp 7 — Full-image crop  | 96x96 -> 128x128 (full image) LR crop | **27.7101 dB** |      0.743748 | Complete |
 | Exp 8 — MSE loss         | L1 -> MSE, stopped after 15-epoch screen |    27.2159 dB |      0.727473 | Complete |
+| Exp 9 — EDSR-lite arch   | ResidualSRNet -> EDSRLite (64F/16B, 1.37M params) |    TBD |     TBD | Planned  |
 
 Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
 (+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and
