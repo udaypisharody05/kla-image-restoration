@@ -176,3 +176,20 @@ fast iteration/screening.
 Experiment 6 (`checkpoints/exp6_crop96/checkpoint_best.pt`, L1, 96x96 crop) remains
 the underlying champion checkpoint: Val PSNR 27.7090 dB, Val SSIM 0.745634 (normal),
 27.7689 dB / 0.747955 with `--tta x8`.
+
+### Experiment 11 (completed — rejected; model ensembling)
+
+With loss substitution, architecture scaling, and TTA all tried, Experiment 11
+tested weighted-averaging Experiment 6's and Experiment 9's **raw predictions**
+(`src/ensemble.py::weighted_average_predictions`, `evaluate_ensemble.py`) to see
+if their errors were complementary enough to beat Experiment 6 + x8 TTA. They were
+not: every weight tested (0.50/0.50, 0.75/0.25, 0.875/0.125 Exp6/Exp9, each with
+and without x8 TTA) scored below its single-model reference on PSNR, SSIM, and L1,
+converging toward — but never past — Experiment 6 alone as Experiment 9's weight
+shrank toward zero. Best configuration (0.875 Exp6 + 0.125 Exp9, x8 TTA): PSNR
+27.7561 dB, SSIM 0.747603 — still **-0.0128 dB / -0.000352 SSIM** below Experiment
+6 + x8 TTA alone. **Ensembling with Experiment 9 is rejected; Experiment 6 + x8
+TTA remains the best inference pipeline.** `src/ensemble.py` and
+`evaluate_ensemble.py` are retained as reusable infrastructure for a future
+architecturally-different candidate (e.g. NAFNet/SwinIR/Restormer), should one be
+trained later.

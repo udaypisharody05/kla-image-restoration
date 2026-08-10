@@ -1637,6 +1637,159 @@ training.
 
 ---
 
+# Experiment 11 — Model Ensemble (Experiment 6 x Experiment 9)
+
+## Status
+
+**Completed -- negative result.** Inference-only, zero retraining. No checkpoint,
+architecture, loss, optimizer, scheduler, or split was modified.
+
+## Objective
+
+With loss substitution (Experiments 4, 5, 8), architecture scaling (Experiment 9),
+and geometric TTA (Experiment 10) all explored, Experiment 11 tests a different
+inference-only idea: whether Experiment 6 (`ResidualSRNet`) and Experiment 9
+(`EDSRLite`) -- two independently trained models with different architectures --
+make sufficiently *different* prediction errors that a weighted average of their
+raw outputs improves validation PSNR/SSIM beyond either model alone, and beyond
+Experiment 6 + x8 TTA (the current best pipeline).
+
+| Model | Checkpoint | Architecture | Parameters |
+| ----- | ---------- | ------------ | ---------: |
+| A (Exp 6) | `checkpoints/exp6_crop96/checkpoint_best.pt` | ResidualSRNet, 64F/8B | 630,724 |
+| B (Exp 9) | `checkpoints/exp9_edsr_lite/checkpoint_best.pt` | EDSRLite, 64F/16B | 1,367,553 |
+
+## Averaging Formula
+
+```
+ensemble = weight_A * Exp6_raw_prediction + weight_B * Exp9_raw_prediction
+```
+
+Each model's **raw** (unclipped) prediction is computed first (optionally via
+`predict_x8` for the x8-TTA variant, reusing `src/tta.py` unchanged), the two raw
+predictions are combined by `src/ensemble.py::weighted_average_predictions`
+(weights normalized to sum to 1, never clips), and only the final combined
+prediction is passed to the existing `src.metrics.psnr`/`ssim` -- which perform
+the only clipping in the whole pipeline, exactly like the TTA and no-TTA paths
+already did. `src/metrics.py` was not modified.
+
+## Implementation
+
+- `src/ensemble.py` -- new, minimal `weighted_average_predictions(predictions,
+  weights=None)` utility. Rejects fewer than 2 predictions, shape mismatches,
+  prediction/weight count mismatches, and non-positive weights; normalizes
+  weights internally; preserves batch/channel/spatial dimensions; never clips.
+- `evaluate_ensemble.py` -- new dedicated evaluation script (kept separate from
+  `evaluate_checkpoint.py` since it loads two checkpoints rather than one).
+  Loads checkpoint A and B via the existing `evaluate_checkpoint.load_model`,
+  builds the canonical validation split via the existing `src.splits.split_pairs`,
+  and scores with the existing `src.metrics.psnr`/`ssim` -- no new model loading,
+  splitting, or metric logic. Supports `--checkpoint-a/-b`, `--weight-a/-b`
+  (default 0.5/0.5), and `--tta {none,x8}` (reuses `src.tta.predict_x8`
+  unchanged, applied independently to each model before combining).
+
+## Tests
+
+`tests/test_ensemble_unit.py` (22 new tests): weighted-average correctness (50/50,
+75/25, and explicit non-normalized weights), default equal weighting, shape/count/
+weight validation, batch/channel/spatial dimension preservation, unclipped raw
+values surviving averaging (including negative and >1 constants), finite-output,
+identical-input idempotence, 3-way averaging, the normal and x8 ensemble
+evaluation paths on a tiny synthetic dataset (the x8 path is cross-checked against
+a manual `predict_x8` + `weighted_average_predictions` computation, proving it
+reuses `src/tta.py` rather than reimplementing TTA), real Experiment 6/9
+checkpoint loading, and the `evaluate_ensemble.py` CLI surface.
+
+`pytest -m "not integration" -q` -> **278 passed, 8 deselected** (up from 256
+before this experiment; all pre-existing tests, including every Experiment 10 TTA
+test, remain unchanged and passing).
+
+## CUDA Sanity Check
+
+Both real checkpoints loaded on CUDA (`NVIDIA GeForce RTX 4060 Laptop GPU`) with
+an 8-sample slice of the validation set: both models produced identical output
+shapes `(4, 1, 256, 256)` for the same input batch, the normal ensemble and the
+x8 ensemble both ran successfully with finite metrics, and no CUDA OOM occurred.
+**Peak CUDA memory allocated: 203.10 MiB.**
+
+## Full 640-Image Validation Comparison
+
+References (Experiments 6 and 9, normal and x8) reuse the values already
+independently verified in Experiments 6, 9, and 10 -- their code paths
+(`train.validate` / `evaluate_checkpoint.validate_x8`) are unchanged by this
+experiment.
+
+| Configuration                  |     Val L1 |       PSNR |       SSIM | Runtime (640 img) |
+| ------------------------------- | ---------: | ---------: | ---------: | -----------------: |
+| Exp 6 normal (reference)        |   0.033420 | 27.7090 dB |   0.745634 |                 -- |
+| Exp 6 + x8 (reference)          |   0.033176 | 27.7689 dB |   0.747955 |                 -- |
+| Exp 9 normal (reference)        |   0.033854 | 27.5658 dB |   0.742162 |                 -- |
+| Exp 9 + x8 (reference)          |   0.033766 | 27.5875 dB |   0.742980 |                 -- |
+| **0.50 A + 0.50 B, normal**     |   0.033479 | 27.6794 dB |   0.745260 |             12.836s |
+| **0.50 A + 0.50 B, x8**         |   0.033394 | 27.7002 dB |   0.746076 |             69.271s |
+| 0.75 A + 0.25 B, normal         |   0.033410 | 27.7051 dB |   0.745791 |             12.908s |
+| 0.75 A + 0.25 B, x8             |   0.033265 | 27.7403 dB |   0.747172 |             69.287s |
+| 0.875 A + 0.125 B, normal       |   0.033405 | 27.7098 dB |   0.745798 |             12.771s |
+| 0.875 A + 0.125 B, x8           |   0.033216 | 27.7561 dB |   0.747603 |             69.377s |
+
+Commands used (identical pattern for each weight/`--tta` combination):
+
+```bash
+python evaluate_ensemble.py --checkpoint-a checkpoints/exp6_crop96/checkpoint_best.pt \
+  --checkpoint-b checkpoints/exp9_edsr_lite/checkpoint_best.pt \
+  --weight-a 0.5 --weight-b 0.5 --tta none
+```
+
+### Weight exploration
+
+The 50/50 ensemble was tested first, per the limited-weight-test protocol. It was
+not *clearly* worse than Experiment 6 alone (-0.0296 dB PSNR, a gap comparable in
+size to Experiment 10's TTA gain, not a decisive regression like Experiment 8's
+MSE-loss result), so weight exploration continued to 0.75/0.25, and then -- since
+that step continued to improve monotonically toward Exp 6 alone -- to the optional
+0.875/0.125 tier. No further, denser search was performed (no grid search, per
+instructions), since the trend across all three weight points was already
+unambiguous: **every ensemble configuration tested, at both TTA settings, scored
+below its corresponding single-model reference (Exp 6 normal or Exp 6 + x8) on
+PSNR, SSIM, and L1**, and metrics moved monotonically *toward* (but never past)
+the Exp 6-alone numbers as Experiment 9's weight was reduced toward zero.
+
+## Deltas (best ensemble configuration: 0.875 A + 0.125 B, x8)
+
+| Comparison                        |     ΔPSNR |      ΔSSIM |       ΔL1 |
+| ---------------------------------- | --------: | ---------: | --------: |
+| vs Exp 6 normal (27.7090/0.745634) |  +0.0471 dB |  +0.001969 | -0.000204 |
+| vs Exp 6 + x8 (27.7689/0.747955)   |  -0.0128 dB |  -0.000352 | +0.000040 |
+
+The best-performing ensemble configuration still trails the current best pipeline
+(Experiment 6 + x8 TTA alone) on every metric.
+
+## Conclusion
+
+Averaging Experiment 6 and Experiment 9's raw predictions **did not improve on
+Experiment 6 alone, at any tested weight, with or without x8 TTA**. The 50/50
+ensemble underperformed Experiment 6 by -0.0296 dB PSNR; shifting weight further
+toward Experiment 6 (0.75/0.25, then 0.875/0.125) monotonically recovered most of
+that gap but never closed it, converging toward -- not past -- Experiment 6's own
+numbers as Experiment 9's contribution shrank toward zero. This indicates
+Experiment 9's prediction errors are not sufficiently independent of/complementary
+to Experiment 6's to yield an ensembling benefit; being the weaker individual
+model (-0.1432 dB PSNR vs Exp 6), Experiment 9 mostly adds noise rather than
+correcting Experiment 6's mistakes. Every combination of ensembling + x8 TTA also
+remained below Experiment 6 + x8 TTA alone, so ensembling does not stack usefully
+with the TTA gain either.
+
+**Decision: reject model ensembling of Experiment 6 and Experiment 9.**
+**Experiment 6 remains the practical champion checkpoint, and Experiment 6 + x8
+TTA remains the best available inference pipeline** (27.7689 dB / 0.747955). The
+ensemble utility (`src/ensemble.py`) and evaluation script
+(`evaluate_ensemble.py`) are retained as reusable infrastructure -- a future
+ensemble candidate with genuinely complementary errors (e.g. a differently-biased
+architecture such as NAFNet/SwinIR/Restormer, not yet attempted) could still be
+tested with the same tools without new code.
+
+---
+
 # Official Test-Set Inference Sanity Check (infrastructure, not a new experiment)
 
 After independently verifying Experiment 6, a small inference sanity check was run
@@ -1671,11 +1824,18 @@ above, which remains the only quantitative comparison in this log.
 | Exp 8 — MSE loss         | L1 -> MSE, stopped after 15-epoch screen |    27.2159 dB |      0.727473 | Complete |
 | Exp 9 — EDSR-lite arch   | ResidualSRNet -> EDSRLite (64F/16B, 1.37M params) | 27.5658 dB | 0.742162 | Complete |
 | Exp 10 — x8 geometric TTA | Inference-only self-ensemble on Exp 6 checkpoint | **27.7689 dB** | **0.747955** | Complete |
+| Exp 11 — Model ensemble  | Weighted average of Exp 6 + Exp 9 raw predictions | 27.7561 dB | 0.747603 | Complete (rejected) |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an
 optional inference-time post-processing step, not a new checkpoint-selection
 candidate; Experiment 6's checkpoint remains the underlying "champion" model.
+
+Note: Exp 11 is not a trained model either -- it is Experiment 6 and Experiment 9's
+checkpoints combined at inference time via weighted raw-prediction averaging. Its
+best tested configuration (0.875 Exp6 + 0.125 Exp9, with x8 TTA) still trails
+Experiment 6 + x8 TTA alone by -0.0128 dB PSNR / -0.000352 SSIM, so it was
+**rejected**; Experiment 6 + x8 TTA remains the best inference pipeline.
 
 Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
 (+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and
