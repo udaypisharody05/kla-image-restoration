@@ -911,8 +911,7 @@ as the best-SSIM reference.
 
 ## Status
 
-**Planned / infrastructure verified.** The real 40-epoch training run has not been
-executed.
+**Completed and independently verified.**
 
 ## Objective
 
@@ -994,7 +993,63 @@ Lower PSNR: retain 64x64 crop
 
 ## Result
 
-TBD -- the real 40-epoch Experiment 6 run has not been started.
+```text
+Best epoch by PSNR: 38
+
+Val L1: 0.033420
+Val PSNR: 27.7090 dB
+Val SSIM: 0.745634
+```
+
+Checkpoint: `checkpoints/exp6_crop96/checkpoint_best.pt`
+
+Independently verified using `evaluate_checkpoint.py`:
+
+```text
+Val L1 = 0.033420
+Val PSNR = 27.7090 dB
+Val SSIM = 0.745634
+Bicubic PSNR = 23.1413 dB
+Bicubic SSIM = 0.550604
+PSNR improvement over bicubic = +4.5677 dB
+SSIM improvement over bicubic = +0.195030
+```
+
+## Comparison vs Experiment 3 and Experiment 5
+
+| Metric | Exp 3 (64x64 crop) | Exp 5 (L1+SSIM) | Exp 6 (96x96 crop) | Exp 6 vs Exp 3 |
+| ------ | ------------------: | ----------------: | -------------------: | --------------: |
+| PSNR   |          27.6212 dB |         27.5282 dB |        **27.7090 dB** |      +0.0878 dB |
+| SSIM   |            0.743619 |         **0.747377** |              0.745634 |        +0.002015 |
+
+## Conclusion
+
+Experiment 6 improved **both** PSNR and SSIM relative to Experiment 3 -- a clear
+improvement per the benchmark criteria (higher PSNR and SSIM). **Experiment 6 is now
+the best-PSNR model overall**, surpassing Experiment 3. Experiment 5 retains a very
+slightly higher SSIM (0.747377 vs 0.745634, a difference of 0.001743) but at a lower
+PSNR than Experiment 6, so it remains the best-SSIM reference only, not the overall
+best model. The larger 96x96 LR training crop (more spatial context per sample) was a
+worthwhile change and did not require any batch-size reduction (fit comfortably in
+GPU memory; see the GPU Memory Sanity Check above).
+
+---
+
+# Official Test-Set Inference Sanity Check (infrastructure, not a new experiment)
+
+After independently verifying Experiment 6, a small inference sanity check was run
+using `infer_test.py` against `checkpoints/exp6_crop96/checkpoint_best.pt` on the first
+10 official competition test images (`data/Data-public/Test_NoisyLR/NoisyLR/000000.npy`
+through `000009.npy`, sorted filename order -- deterministic, not random).
+
+The official test set has **no locally available ground truth**. Test PSNR and SSIM are
+therefore **not available and were not computed** -- do not infer them from this note.
+This was a visual/numerical sanity check only (finite outputs, correct 128x128 ->
+256x256 shapes, bicubic-vs-neural comparison images), not model evaluation or selection.
+Results: `results/test_sanity_exp6/` (raw predictions, bicubic baselines, per-image
+comparison PNGs, one contact sheet, and `sanity_stats.json`). All 10 predictions were
+finite with no NaN/Inf. This does not change Experiment 6's validation-based ranking
+above, which remains the only quantitative comparison in this log.
 
 ---
 
@@ -1006,10 +1061,10 @@ TBD -- the real 40-epoch Experiment 6 run has not been started.
 | Exp 1 — Residual CNN     | First neural baseline (20 epochs)     |     27.0870 dB |      0.725385 | Complete |
 | Exp 2B — Longer training | 40 epochs, fixed LR                   |     27.2704 dB |      0.731226 | Complete |
 | Exp 2 — Optimization     | 40 epochs, ReduceLROnPlateau          |     27.2959 dB |      0.734007 | Complete |
-| Exp 3 — Capacity         | 64 features / 8 blocks (7.45x params) | **27.6212 dB** |      0.743619 | Complete |
+| Exp 3 — Capacity         | 64 features / 8 blocks (7.45x params) |     27.6212 dB |      0.743619 | Complete |
 | Exp 4 — Charbonnier loss | L1 -> Charbonnier (eps=1e-3)          |     27.5881 dB |      0.743230 | Complete |
 | Exp 5 — L1+SSIM loss     | L1 -> L1 + 0.1*(1-SSIM)               |     27.5282 dB |  **0.747377** | Complete |
-| Exp 6 — Larger crop      | 64x64 -> 96x96 LR crop                |             TBD |           TBD | Planned  |
+| Exp 6 — Larger crop      | 64x64 -> 96x96 LR crop                | **27.7090 dB** |      0.745634 | Complete |
 
 ---
 

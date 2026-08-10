@@ -31,3 +31,5 @@ wandb/
 .DS_Store
 Thumbs.db
 __MACOSX/
+# Generated test inference outputs
+results/test_sanity_exp6/
