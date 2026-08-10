@@ -193,3 +193,44 @@ TTA remains the best inference pipeline.** `src/ensemble.py` and
 `evaluate_ensemble.py` are retained as reusable infrastructure for a future
 architecturally-different candidate (e.g. NAFNet/SwinIR/Restormer), should one be
 trained later.
+
+### Experiment 12 (prepared, not yet run — NAFNet-SR architecture)
+
+A genuinely different feature-processing design, prepared but **not yet
+trained**: `src/models/nafnet_sr.py` implements NAFNet-style gated blocks
+locally (channel-wise `LayerNorm2d`, `SimpleGate` split-and-multiply as the only
+in-block nonlinearity — no ReLU/GELU, simplified channel attention, learnable
+zero-initialized per-branch residual scales) wrapped in the same shallow-conv /
+long-skip / PixelShuffle-upsample skeleton as `ResidualSRNet`/`EDSRLite`. Wired
+into the shared model factory as `architecture="nafnet_sr"` (`--model nafnet_sr`
+on `train.py`; `evaluate_checkpoint.py`/`infer_test.py` needed no changes since
+both already reconstruct exclusively through `build_model`); legacy and
+`edsr_lite` checkpoints are unaffected, and all 5 cross-architecture resume
+mismatches are rejected by the existing dict-equality check.
+
+**Sizing note:** an initial 96-feature/12-block candidate (1.23M params, in the
+suggested 1-3M range) was rejected by the CUDA sanity check — NAFNet-style blocks
+carry far more *activation* memory per parameter than this project's other
+architectures (~10 sequential ops per block vs. 2), and that candidate needed
+~13 GB at batch16/crop96, exceeding the 8 GB RTX 4060 Laptop GPU. Per the task's
+explicit instruction, batch/crop size were left untouched and the **architecture
+was resized down instead**: the chosen configuration is **64 features / 8 NAF
+blocks, 432,129 parameters** (0.685x Exp 6, 0.316x Exp 9), which fits safely
+(peak reserved ~6.47 GB of 8.19 GB, ~322 ms/batch — verified by a real CUDA
+forward+backward+optimizer-step sanity check and a tiny real-data smoke run,
+both passing; smoke checkpoint deleted, not committed, no historical checkpoint
+touched).
+
+**Next step: a real Experiment 12 screening run**, e.g.:
+
+```bash
+python train.py --model nafnet_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --epochs 15 --checkpoint-dir checkpoints/exp12_nafnet_sr
+```
+
+then compare with `evaluate_checkpoint.py --checkpoint checkpoints/exp12_nafnet_sr/checkpoint_best.pt`
+against Experiment 6 (27.7090 dB / 0.745634) before deciding whether a full
+40-epoch run or x8 TTA evaluation is warranted. **This run has not been
+started.**

@@ -1790,6 +1790,237 @@ tested with the same tools without new code.
 
 ---
 
+# Experiment 12 — NAFNet-SR Architecture
+
+## Status
+
+**PLANNED / PREPARED.** Implementation, tests, CUDA sanity, and a tiny real-data
+smoke test are complete and passing. **No real training run has been started.**
+The smoke-run metrics below are explicitly *not* an experiment result (1 epoch,
+32 train / 16 val samples, freshly initialized weights) and must not be compared
+against any other experiment's numbers.
+
+## Hypothesis
+
+Experiments 4, 5, 8 (loss substitution), 9 (deeper/wider residual architecture),
+10 (geometric TTA), and 11 (model ensembling) have all been tried against
+Experiment 6. Only TTA (Experiment 10) improved on it; scaling the same residual-
+block design further (Experiment 9) did not, and ensembling two residual-style
+architectures (Experiment 11) did not either. Experiment 12 tests a **genuinely
+different feature-processing design** rather than another variation on the
+residual-CNN theme: NAFNet-style gated blocks (no traditional activation
+function, channel-splitting multiplicative gating, simplified channel attention,
+channel-wise LayerNorm instead of BatchNorm) adapted to 2x super-resolution. The
+hypothesis is that this different inductive bias may capture noise/detail
+patterns the residual-CNN family (Experiments 1-9, 11) does not, and is worth
+screening on its own merits before deciding whether it is worth a full 40-epoch
+run.
+
+## Architecture
+
+Implemented locally in `src/models/nafnet_sr.py` -- no third-party NAFNet
+package, no pretrained weights. Core components:
+
+- **`LayerNorm2d`**: channel-wise layer normalization for `[N,C,H,W]` tensors
+  (mean/variance computed per spatial position, across channels). NAFNet's
+  normalization choice; not BatchNorm (no running statistics, no batch-size
+  dependence).
+- **`SimpleGate`**: splits channels into two equal halves and multiplies them
+  element-wise. This *is* the block's entire nonlinearity -- no ReLU/GELU
+  anywhere inside a `NAFBlock`.
+- **`NAFBlock`**: a gated conv branch (`LayerNorm2d` -> 1x1 conv channel
+  expansion -> 3x3 **depthwise** conv -> `SimpleGate` -> simplified channel
+  attention (global average pool -> 1x1 conv, multiplied back in, no extra
+  nonlinearity) -> 1x1 projection back to `num_channels`, added to the block
+  input through a learnable per-channel scale `beta`), followed by a gated
+  feed-forward branch (`LayerNorm2d` -> 1x1 expansion -> `SimpleGate` -> 1x1
+  projection, added back through a learnable per-channel scale `gamma`).
+  `beta`/`gamma` are both initialized to **zero**, so every `NAFBlock` starts
+  training as an exact identity map (NAFNet's stabilizing init trick, verified
+  by a dedicated unit test).
+- **`NAFNetSR`**: adapts the (same-resolution) NAFNet design to 2x
+  super-resolution using the same skeleton already established by
+  `ResidualSRNet`/`EDSRLite`: shallow 3x3 conv -> `num_blocks` x `NAFBlock`
+  (operating at the LR resolution, no pooling/striding anywhere) -> 3x3 conv ->
+  long/global residual connection back to the post-shallow-conv features -> 3x3
+  conv (`num_features -> num_features*scale^2`) -> `PixelShuffle(scale)` -> 3x3
+  reconstruction conv. Learned upsampling only -- no interpolation-only output
+  path.
+
+## Chosen Configuration (revised after CUDA sanity -- see below)
+
+| Parameter | Value |
+| --- | --- |
+| Feature width (`num_features`) | 64 |
+| NAF blocks (`num_blocks`) | 8 |
+| Conv-branch expansion (`dw_expand`) | 2 |
+| FFN-branch expansion (`ffn_expand`) | 2 |
+| Scale | 2 |
+| **Parameter count** | **432,129** |
+
+Ratio vs Experiment 6 (630,724 params): **0.685x**. Ratio vs Experiment 9
+(1,367,553 params): **0.316x**.
+
+An initial candidate (96 features / 12 blocks, 1,229,185 params -- targeting the
+"1-3M parameter" region suggested for this experiment, and a closer capacity
+match to Experiment 9) was rejected by the CUDA sanity check: at batch16/crop96
+it required **~13.1 GB peak allocated CUDA memory**, exceeding the RTX 4060
+Laptop GPU's 8 GB VRAM. This was not a bug -- a forward-only vs. forward+backward
+memory comparison confirmed it scales as expected with batch size (real
+activation memory, not a leak), and per-batch runtime collapsed to ~18.9 seconds
+(vs. an expected tens of milliseconds), consistent with Windows silently
+spilling into slow shared/system memory rather than raising a hard CUDA OOM.
+Per this task's explicit instruction ("if batch16 OOMs or is clearly unsafe,
+STOP; do not silently reduce batch size"), batch size, crop size, and every
+other controlled training variable were left untouched -- **the architecture
+size itself was reduced instead**, which is the one variable Experiment 12 is
+actually about choosing. The root cause is architectural, not a sizing
+coincidence: each `NAFBlock` has roughly 10 sequential activation-heavy ops
+(two norms, four 1x1 convs, one depthwise 3x3, two gates, one pooled-attention
+conv) that autograd must retain for backward, versus 2 conv ops for a
+`ResidualSRNet`/`EDSRLite` block -- so NAFNet-style blocks cost substantially
+more *activation* memory per parameter than this project's other architectures,
+independent of raw parameter count. 64 features / 8 blocks was chosen as a
+configuration that fits safely (see CUDA sanity below) while remaining
+"NAFNet-SR-Lite" rather than a toy size.
+
+## Model Factory / CLI
+
+- `src/models/__init__.py`: `build_model_config`/`build_model` extended with
+  `architecture="nafnet_sr"`, plus new `dw_expand`/`ffn_expand` parameters
+  (default 2/2, not exposed as new CLI flags -- Experiment 12 has one clearly
+  defined configuration, matching this project's existing convention of pinning
+  architecture-internal constants like EDSRLite's `residual_scale`).
+  `residual_sr`/`edsr_lite` configs and reconstruction are byte-for-byte
+  unchanged; default architecture remains `residual_sr`.
+- `train.py --model` gains the `nafnet_sr` choice (`residual_sr` still default).
+  No other CLI, loss, crop, scheduler, optimizer, or seed behavior changed.
+- `evaluate_checkpoint.py`/`infer_test.py` require **no changes** -- both
+  already reconstruct models exclusively through `build_model`, so a
+  `nafnet_sr` checkpoint loads through the identical existing code path,
+  confirmed by tests and by the smoke-test evaluation below.
+- `src/tta.py` (x8 geometric self-ensemble) and `src/ensemble.py` (model
+  ensembling) are architecture-agnostic and were **not modified**; both
+  confirmed working with `NAFNetSR` by test and by the smoke-test run below.
+
+### Exact `model_config`
+
+```python
+{
+    "architecture": "nafnet_sr",
+    "in_channels": 1,
+    "out_channels": 1,
+    "num_features": 64,
+    "num_blocks": 8,
+    "scale": 2,
+    "dw_expand": 2,
+    "ffn_expand": 2,
+}
+```
+
+## Checkpoint / Resume Compatibility
+
+Verified by `tests/test_training_unit.py`:
+
+- Matching NAFNet-SR checkpoint + config -> resume succeeds (weights restored
+  exactly, epoch/best-PSNR continuation correct).
+- NAFNet-SR checkpoint + `residual_sr` config -> rejected.
+- NAFNet-SR checkpoint + `edsr_lite` config -> rejected.
+- `residual_sr` checkpoint + NAFNet-SR config -> rejected.
+- `edsr_lite` checkpoint + NAFNet-SR config -> rejected.
+- Legacy (no-`"architecture"`-key) checkpoints still reconstruct as
+  `ResidualSRNet`, unchanged.
+
+All five mismatch directions are rejected by the existing, unmodified
+dict-equality check in `load_checkpoint_for_resume` -- no new compatibility
+logic was needed, the same mechanism that already protected `edsr_lite`.
+
+## Tests
+
+36 new tests: `tests/test_nafnet_sr_unit.py` (24 -- shapes/finiteness/gradients,
+exact Experiment 12 parameter count, `SimpleGate` split-multiply correctness and
+non-equivalence to ReLU/GELU, `NAFBlock` shape preservation and zero-init
+identity behavior, `LayerNorm2d` channel-axis normalization, no-BatchNorm check,
+x8 TTA compatibility), plus factory tests in `tests/test_model_unit.py` and
+checkpoint/resume/loading tests in `tests/test_training_unit.py` (config shape,
+`build_model` reconstruction, all 5 mismatch-rejection directions,
+`evaluate_checkpoint`/`infer_test`'s shared `load_model` reconstructing
+`NAFNetSR`).
+
+`pytest -m "not integration" -q` -> **314 passed, 8 deselected** (up from 278;
+every pre-existing test, including all TTA and ensemble tests, remains
+unchanged and passing).
+
+## CUDA Sanity Check
+
+Exact Experiment 12 configuration, `batch=16`, `input=[16,1,96,96]`,
+`loss=L1`, `optimizer=Adam`, forward -> loss -> backward -> optimizer step,
+10 timed iterations after 3 discarded warmup iterations:
+
+| Check | Result |
+| --- | --- |
+| Device | NVIDIA GeForce RTX 4060 Laptop GPU (CUDA) |
+| Parameter count | 432,129 |
+| Output shape | `(16, 1, 192, 192)` (matches expected exactly) |
+| Output finite | True |
+| Loss finite | True |
+| All gradients finite | True |
+| Peak allocated CUDA memory | 6,007.4 MiB |
+| Peak reserved CUDA memory | 6,470.0 MiB |
+| Total VRAM | 8,187.5 MiB |
+| Headroom | ~1,718 MiB (~21%) |
+| Per-batch runtime (avg of 10) | 322.5 ms |
+| OOM | None |
+
+No OOM, healthy headroom under the 8 GB budget, and per-batch runtime back to a
+normal (millisecond-scale) range -- confirming the earlier 96f/12b candidate's
+~18.9-second-per-batch result was specifically a memory-pressure artifact of
+that oversized configuration, not an inherent property of NAFNet-SR-Lite.
+
+## Real-Data Smoke Test (infrastructure verification only -- not a result)
+
+```bash
+python train.py --model nafnet_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --epochs 1 --max-train-samples 32 --max-val-samples 16 \
+  --checkpoint-dir checkpoints/exp12_nafnet_sr_smoke --num-workers 0
+```
+
+Verified and then deleted (`checkpoints/exp12_nafnet_sr_smoke/`, not committed):
+
+- CUDA used; printed `Model: nafnet_sr (432,129 trainable parameters)` and the
+  exact `model_config` above.
+- Training and validation both completed in 1.6s; PSNR/SSIM computed via the
+  existing unmodified metric functions; `checkpoint_best.pt` saved.
+- `evaluate_checkpoint.py --tta none` and `--tta x8` both loaded the smoke
+  checkpoint and ran to completion with finite metrics.
+- `infer_test.py`'s model-loading path (`evaluate_checkpoint.load_model`)
+  reconstructed `NAFNetSR` correctly; `run_inference(..., tta="none")` and
+  `run_inference(..., tta="x8")` both produced finite, correctly-shaped
+  (2x input) predictions on a synthetic full-resolution-style test tensor.
+- No historical checkpoint was read or written during this test.
+
+The smoke run's own numbers (Val PSNR ~7-8 dB, near-random since the network
+saw only 32 samples for 1 epoch) are **not an experiment result** and are
+recorded here only as evidence the pipeline works end-to-end; they must not be
+compared against Experiment 6/9/10/11.
+
+## Checkpoint Safety
+
+All 22 historical checkpoint files across Experiments 1-9 were SHA-256-hashed
+before and after this preparation task; every hash is unchanged. Specifically
+re-verified for `checkpoints/exp6_crop96/{checkpoint_best,checkpoint_latest}.pt`
+and `checkpoints/exp9_edsr_lite/{checkpoint_best,checkpoint_latest}.pt`.
+
+## Result
+
+**TBD.** No real Experiment 12 training run has been started. The next step is
+a screening run (see `claude_code_project_handoff.md` for the exact command),
+not yet executed.
+
+---
+
 # Official Test-Set Inference Sanity Check (infrastructure, not a new experiment)
 
 After independently verifying Experiment 6, a small inference sanity check was run
@@ -1825,6 +2056,7 @@ above, which remains the only quantitative comparison in this log.
 | Exp 9 — EDSR-lite arch   | ResidualSRNet -> EDSRLite (64F/16B, 1.37M params) | 27.5658 dB | 0.742162 | Complete |
 | Exp 10 — x8 geometric TTA | Inference-only self-ensemble on Exp 6 checkpoint | **27.7689 dB** | **0.747955** | Complete |
 | Exp 11 — Model ensemble  | Weighted average of Exp 6 + Exp 9 raw predictions | 27.7561 dB | 0.747603 | Complete (rejected) |
+| Exp 12 — NAFNet-SR arch  | ResidualSRNet -> NAFNet-style gated blocks (64F/8B, 432K params) | TBD | TBD | Planned / prepared |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an

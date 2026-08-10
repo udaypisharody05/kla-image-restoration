@@ -10,6 +10,7 @@ reconstruction path instead of duplicating ``ResidualSRNet(**model_config)``
 from torch import nn
 
 from .edsr_lite import EDSRLite, EDSRResidualBlock
+from .nafnet_sr import NAFBlock, NAFNetSR
 from .residual_sr import ResidualBlock, ResidualSRNet
 
 __all__ = [
@@ -17,6 +18,8 @@ __all__ = [
     "ResidualSRNet",
     "EDSRResidualBlock",
     "EDSRLite",
+    "NAFBlock",
+    "NAFNetSR",
     "build_model_config",
     "build_model",
 ]
@@ -30,6 +33,8 @@ def build_model_config(
     num_blocks: int = 8,
     scale: int = 2,
     residual_scale: float = 0.1,
+    dw_expand: int = 2,
+    ffn_expand: int = 2,
 ) -> dict:
     """Turn CLI/config values into a plain, checkpoint-serializable dict.
 
@@ -58,6 +63,17 @@ def build_model_config(
             "num_blocks": num_blocks,
             "scale": scale,
             "residual_scale": residual_scale,
+        }
+    if architecture == "nafnet_sr":
+        return {
+            "architecture": "nafnet_sr",
+            "in_channels": in_channels,
+            "out_channels": out_channels,
+            "num_features": num_features,
+            "num_blocks": num_blocks,
+            "scale": scale,
+            "dw_expand": dw_expand,
+            "ffn_expand": ffn_expand,
         }
     raise ValueError(f"Unknown architecture: {architecture}")
 
@@ -88,5 +104,15 @@ def build_model(model_config: dict) -> nn.Module:
             num_blocks=model_config["num_blocks"],
             scale=model_config["scale"],
             residual_scale=model_config["residual_scale"],
+        )
+    if architecture == "nafnet_sr":
+        return NAFNetSR(
+            in_channels=model_config["in_channels"],
+            out_channels=model_config["out_channels"],
+            num_features=model_config["num_features"],
+            num_blocks=model_config["num_blocks"],
+            scale=model_config["scale"],
+            dw_expand=model_config["dw_expand"],
+            ffn_expand=model_config["ffn_expand"],
         )
     raise ValueError(f"Unknown architecture: {architecture}")

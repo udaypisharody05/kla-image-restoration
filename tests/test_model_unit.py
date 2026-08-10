@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.models import EDSRLite, ResidualSRNet, build_model, build_model_config
+from src.models import EDSRLite, NAFNetSR, ResidualSRNet, build_model, build_model_config
 
 
 @pytest.mark.parametrize(
@@ -177,3 +177,47 @@ def test_experiment_6_style_model_config_still_works_through_factory() -> None:
     model = build_model(exp6_config)
     assert isinstance(model, ResidualSRNet)
     assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 630_724
+
+
+# --- Experiment 12: NAFNet-SR model factory support ---
+
+
+def test_nafnet_sr_config_includes_architecture_and_expansion_factors() -> None:
+    config = build_model_config(
+        "nafnet_sr", num_features=64, num_blocks=8, scale=2, dw_expand=2, ffn_expand=2
+    )
+    assert config == {
+        "architecture": "nafnet_sr",
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 64,
+        "num_blocks": 8,
+        "scale": 2,
+        "dw_expand": 2,
+        "ffn_expand": 2,
+    }
+
+
+def test_build_model_reconstructs_nafnet_sr() -> None:
+    config = build_model_config("nafnet_sr", num_features=8, num_blocks=2, scale=2)
+    model = build_model(config)
+    assert isinstance(model, NAFNetSR)
+    output = model(torch.randn(1, 1, 16, 16))
+    assert output.shape == (1, 1, 32, 32)
+
+
+def test_experiment_12_style_model_config_still_works_through_factory() -> None:
+    """Experiment 12's exact intended model_config, reconstructed through build_model."""
+    exp12_config = {
+        "architecture": "nafnet_sr",
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 64,
+        "num_blocks": 8,
+        "scale": 2,
+        "dw_expand": 2,
+        "ffn_expand": 2,
+    }
+    model = build_model(exp12_config)
+    assert isinstance(model, NAFNetSR)
+    assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 432_129
