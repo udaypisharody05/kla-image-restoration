@@ -1156,9 +1156,12 @@ independent evaluation.
 
 ## Status
 
-**PLANNED / PREPARED.** Infrastructure implemented, unit-tested, CUDA-sanity-checked,
-and smoke-tested. The real 40-epoch training run has **not** been executed -- no
-results below are real training results.
+**COMPLETED — STOPPED AFTER SCREENING.** Run as a 15-epoch screening budget (not the
+full 40-epoch schedule) to cheaply test the MSE hypothesis before committing full
+training time. Screening results were decisively worse than Experiment 6 at a
+comparable or later point in training, so the run was deliberately stopped at 15
+epochs rather than continued to 40. `checkpoints/exp8_mse/` is retained for
+reproducibility.
 
 ## Objective
 
@@ -1167,7 +1170,7 @@ validation PSNR. PSNR is a direct (monotonic, log-scaled) function of MSE, so di
 minimizing MSE during training may align the training objective more closely with the
 checkpoint-selection metric than L1 does.
 
-## Planned Configuration (identical to Experiment 6 except loss)
+## Configuration (identical to Experiment 6 except loss and epoch budget)
 
 ```text
 Architecture:      ResidualSRNet, unchanged (64 features, 8 residual blocks, 630,724 parameters)
@@ -1184,20 +1187,85 @@ Scheduler:          ReduceLROnPlateau
   Min LR:           1e-6
 
 Batch size:         16
-Epochs:             40
+Epochs:             15 (screening budget; full schedule would have been 40)
 Seed:               42
 
-Training crop:      LR 96x96 / GT 192x192 (returns to Experiment 6's crop, not Experiment 7's)
+Training crop:      LR 96x96 / GT 192x192 (Experiment 6's crop, not Experiment 7's)
 Validation:         full images, unchanged (128x128 LR / 256x256 GT, no augmentation)
 
 Train samples:      2560
 Validation samples: 640
 ```
 
-Change from Experiment 6: reconstruction loss only (L1 -> MSE). Everything else --
-architecture, optimizer, scheduler, batch size, epoch count, seed, crop size,
+Change from Experiment 6: reconstruction loss only (L1 -> MSE), plus a deliberately
+shortened screening budget (15 epochs instead of 40) to test the hypothesis cheaply.
+Everything else -- architecture, optimizer, scheduler, batch size, seed, crop size,
 dataset/split, validation preprocessing, metric implementation and clipping convention,
 checkpointing/resume semantics -- unchanged.
+
+## Screening Results
+
+|  Epoch | Val PSNR (dB) |     Val SSIM |             |
+| -----: | ------------: | -----------: | ----------- |
+|      1 |       26.0065 |     0.659793 |             |
+|      5 |       27.0446 |     0.720486 |             |
+|      9 |       27.2118 |     0.723958 |             |
+| **13** |   **27.2159** | **0.727473** | best PSNR   |
+|     15 |       27.1834 |     0.729404 | run stopped |
+
+Best checkpoint: epoch 13, `checkpoints/exp8_mse/checkpoint_best.pt`.
+
+Independently verified using `evaluate_checkpoint.py`:
+
+```bash
+python evaluate_checkpoint.py --checkpoint checkpoints/exp8_mse/checkpoint_best.pt --data-dir data/Data-public
+```
+
+```text
+Using device: cuda
+Loaded checkpoint checkpoints\exp8_mse\checkpoint_best.pt (epoch=13, best_val_psnr=27.215915462443217)
+Training loss: MSE ({'name': 'mse'})
+Validation samples: 640
+Val L1 (diagnostic, always L1 regardless of training loss): 0.035239
+Val PSNR: 27.2159 dB
+Val SSIM: 0.727473
+Bicubic PSNR: 23.1413 dB
+Bicubic SSIM: 0.550604
+PSNR vs bicubic: +4.0746 dB
+SSIM vs bicubic: +0.176869
+```
+
+Independently reproduced exactly (epoch 13, Val PSNR 27.2159 dB, Val SSIM 0.727473,
+Val L1 diagnostic 0.035239, +4.0746 dB / +0.176869 over bicubic) -- confirms checkpoint
+loading, model reconstruction, and the validation pipeline all remain correct.
+
+## Comparison vs Experiment 6
+
+| Metric   | Exp 6 (L1, epoch 38) | Exp 8 (MSE, epoch 13) | Exp 8 vs Exp 6 |
+| -------- | ---------------------: | -----------------------: | --------------: |
+| Val PSNR |             27.7090 dB |               27.2159 dB |     -0.4931 dB |
+| Val SSIM |               0.745634 |                 0.727473 |       -0.018161 |
+
+MSE also underperforms L1 at comparable epoch counts, not only at its own best epoch --
+Experiment 6 had already reached 27.0012 dB by its own epoch 14 and kept improving
+steadily through epoch 38, while Experiment 8's PSNR peaked at epoch 13 (27.2159 dB)
+and had already begun to plateau/wobble by epoch 15 (27.1834 dB, a slight regression),
+suggesting MSE was not simply "behind schedule" but converging to a worse optimum for
+this model/data combination.
+
+## Conclusion
+
+MSE substantially underperformed L1 in this controlled comparison: -0.4931 dB PSNR and
+-0.018161 SSIM versus Experiment 6, with early signs of plateauing rather than
+continued improvement. Continuing to the full 40-epoch budget was judged very unlikely
+to close a gap of this size, so the run was **deliberately stopped at 15 epochs**
+(a screening budget, not a resource failure or bug) rather than spending the remaining
+~25 epochs of compute chasing an already-decisive negative result. **Experiment 8 is
+recorded as a completed negative/neutral result; L1 remains the preferred
+reconstruction loss.** `checkpoints/exp8_mse/` is kept (not deleted) for
+reproducibility. The next research direction is architecture improvement, not another
+simple loss substitution -- Experiments 4 (Charbonnier), 5 (L1+SSIM), and 8 (MSE) have
+now all been tried against L1 without producing a PSNR improvement over Experiment 6.
 
 ## Implementation
 
@@ -1231,18 +1299,16 @@ via `loss_label()` and always scores an actual-L1 diagnostic regardless of train
   `loss_config: {"name": "mse"}`; `evaluate_checkpoint.py` correctly read it back and
   printed `Training loss: MSE ({'name': 'mse'})`.
 
-## Checkpoint Directory (for the eventual real run)
+## Checkpoint Directory
 
 ```text
-checkpoints/exp8_mse/checkpoint_latest.pt
-checkpoints/exp8_mse/checkpoint_best.pt
+checkpoints/exp8_mse/checkpoint_latest.pt   (epoch 15, run end)
+checkpoints/exp8_mse/checkpoint_best.pt     (epoch 13, best Val PSNR)
 ```
 
-Separate from all prior experiment directories, all of which remain untouched.
-
-## Result
-
-TBD -- the real 40-epoch Experiment 8 run has not been started.
+Both retained (not deleted) for reproducibility. Separate from all prior experiment
+directories, all of which remain untouched. Checkpoint file hashes (SHA-256) were
+verified identical before and after independent evaluation in this task.
 
 ---
 
@@ -1277,13 +1343,17 @@ above, which remains the only quantitative comparison in this log.
 | Exp 5 — L1+SSIM loss     | L1 -> L1 + 0.1*(1-SSIM)               |     27.5282 dB |  **0.747377** | Complete |
 | Exp 6 — Larger crop      | 64x64 -> 96x96 LR crop                |     27.7090 dB |      0.745634 | Complete |
 | Exp 7 — Full-image crop  | 96x96 -> 128x128 (full image) LR crop | **27.7101 dB** |      0.743748 | Complete |
-| Exp 8 — MSE loss         | L1 -> MSE (torch.nn.MSELoss)          |             TBD |           TBD | Planned  |
+| Exp 8 — MSE loss         | L1 -> MSE, stopped after 15-epoch screen |    27.2159 dB |      0.727473 | Complete |
 
 Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
 (+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and
-Exp 7 is substantially slower per epoch. **Experiment 6 (96x96 crop) remains the
-practical preferred configuration**; Experiment 7 is a completed, neutral result that
-does not change that recommendation.
+Exp 7 is substantially slower per epoch. **Experiment 6 (96x96 crop, L1 loss) remains
+the practical preferred configuration**; Experiment 7 is a completed, neutral result
+that does not change that recommendation. Experiment 8 (MSE loss) is a completed
+negative result -- stopped at a 15-epoch screening budget after underperforming
+Experiment 6 by -0.4931 dB PSNR / -0.018161 SSIM with early signs of plateauing;
+**L1 remains the preferred reconstruction loss**. The next research direction is
+architecture improvement, not another loss substitution.
 
 ---
 

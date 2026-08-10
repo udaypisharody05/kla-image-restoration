@@ -131,12 +131,21 @@ over the 23.1413 dB / 0.550604 bicubic baseline).
   (Experiment 7) — Experiment 6 already captured the benefit of extra crop context;
   going further did not help.
 
-### Next step: Experiment 8 (prepared, not yet run)
+### Experiment 8 (completed — negative result; MSE loss)
 
-`--loss mse` support is implemented, unit-tested, CUDA-sanity-checked, and smoke-tested
-(see `EXPERIMENT_LOG.md`'s Experiment 8 section) but the real 40-epoch run has not been
-started. Planned command (Experiment 6's recipe with MSE substituted for L1):
+`--loss mse` (`checkpoints/exp8_mse/checkpoint_best.pt`, epoch 13) was screened for 15
+of the planned 40 epochs and **stopped deliberately** after underperforming Experiment 6
+by -0.4931 dB PSNR (27.2159 dB vs 27.7090 dB) and -0.018161 SSIM (0.727473 vs
+0.745634), with early signs of plateauing rather than catching up. The checkpoint is
+retained (not deleted) for reproducibility, but training was not continued to 40 epochs
+since the gap was already decisive. **L1 remains the preferred reconstruction loss** —
+Experiments 4 (Charbonnier), 5 (L1+SSIM), and 8 (MSE) have now all been tried against L1
+without beating Experiment 6 on PSNR.
 
-```bash
-python train.py --data-dir data/Data-public --epochs 40 --batch-size 16 --lr 1e-4 --seed 42 --num-features 64 --num-blocks 8 --loss mse --crop-size 96 --checkpoint-dir checkpoints/exp8_mse --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6
-```
+### Next step: architecture improvement
+
+With loss-function substitution (Experiments 4, 5, 8) exhausted without a PSNR win, the
+next research direction is **architecture improvement** (e.g. more/different residual
+capacity, attention, or a different upsampling scheme) rather than another simple loss
+swap. Experiment 6 (`checkpoints/exp6_crop96/checkpoint_best.pt`, L1, 96x96 crop) remains
+the baseline to beat: Val PSNR 27.7090 dB, Val SSIM 0.745634.
