@@ -109,3 +109,24 @@ scheduler, data order, and metrics are completely unaffected, and resuming a che
 with different thermal settings than it was originally trained with is always legal
 (thermal settings are recorded in `training_config` for reference only, never checked on
 resume).
+
+## Current best model (updated after Experiment 7; see EXPERIMENT_LOG.md for full history)
+
+**Experiment 6 (`checkpoints/exp6_crop96/checkpoint_best.pt`) is the practical preferred
+configuration** — ResidualSRNet, 64 features / 8 residual blocks (630,724 params), L1
+loss, Adam, ReduceLROnPlateau, 96x96 LR training crop, 40 epochs, seed 42. Independently
+verified: Val PSNR 27.7090 dB, Val SSIM 0.745634, Val L1 0.033420 (+4.5677 dB / +0.195030
+over the 23.1413 dB / 0.550604 bicubic baseline).
+
+- Experiment 5 (`checkpoints/exp5_l1_ssim/checkpoint_best.pt`) has the highest SSIM on
+  record (0.747377) but lower PSNR (27.5282 dB) — kept as the best-SSIM reference only,
+  not the overall pick.
+- Experiment 7 (`checkpoints/exp7_crop128/checkpoint_best.pt`, full 128x128-image
+  training crop) is **completed but neutral**: numerically the highest PSNR
+  (27.7101 dB, +0.0011 dB over Experiment 6 — within noise), but slightly worse SSIM
+  (0.743748) and substantially slower per epoch (~38-42s vs ~25-27s), for no real gain.
+  It does not replace Experiment 6 as the recommended configuration.
+- **Recommendation for future experiments: use a 96x96 LR training crop
+  (`--crop-size 96`)**, not 64x64 (Experiments 1-5) or the full 128x128 image
+  (Experiment 7) — Experiment 6 already captured the benefit of extra crop context;
+  going further did not help.

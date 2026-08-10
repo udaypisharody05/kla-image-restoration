@@ -1035,6 +1035,123 @@ GPU memory; see the GPU Memory Sanity Check above).
 
 ---
 
+# Experiment 7 — Full-Image Training Crop
+
+## Status
+
+**Completed and independently verified.**
+
+## Objective
+
+Test whether training on the full 128x128 LR image (256x256 GT) -- the maximum possible
+spatial context, no random crop at all -- improves validation restoration quality beyond
+Experiment 6's 96x96 crop, using Experiment 6's exact training recipe otherwise.
+
+## Configuration
+
+```text
+Architecture:      ResidualSRNet, unchanged (64 features, 8 residual blocks, 630,724 parameters)
+PixelShuffle:       x2
+Scale:              2
+
+Loss:               L1Loss
+Optimizer:          Adam
+Initial LR:         1e-4
+Scheduler:          ReduceLROnPlateau
+  Mode:             max
+  Factor:           0.5
+  Patience:         3
+  Min LR:           1e-6
+
+Batch size:         16
+Epochs:             40
+Seed:               42
+
+Training crop:      LR 128x128 / GT 256x256 (full image -- no random crop offset possible)
+Validation:         full images, unchanged (128x128 LR / 256x256 GT, no augmentation)
+
+Train samples:      2560
+Validation samples: 640
+```
+
+Change from Experiment 6: training crop only (96x96 -> 128x128, i.e. the full LR image).
+Everything else -- architecture, loss, optimizer, scheduler, batch size, epoch count,
+seed, dataset/split, validation preprocessing, metric implementation and clipping
+convention, checkpointing/resume semantics -- unchanged.
+
+## Result
+
+```text
+Best epoch by PSNR: 38
+
+Val L1: 0.033430
+Val PSNR: 27.7101 dB
+Val SSIM: 0.743748
+```
+
+Checkpoint: `checkpoints/exp7_crop128/checkpoint_best.pt`
+
+Independently verified using `evaluate_checkpoint.py`:
+
+```bash
+python evaluate_checkpoint.py --checkpoint checkpoints/exp7_crop128/checkpoint_best.pt --data-dir data/Data-public
+```
+
+```text
+Using device: cuda
+Loaded checkpoint checkpoints\exp7_crop128\checkpoint_best.pt (epoch=38, best_val_psnr=27.71012558457606)
+Training loss: L1 ({'name': 'l1'})
+Validation samples: 640
+Val L1 (diagnostic, always L1 regardless of training loss): 0.033430
+Val PSNR: 27.7101 dB
+Val SSIM: 0.743748
+Bicubic PSNR: 23.1413 dB
+Bicubic SSIM: 0.550604
+PSNR vs bicubic: +4.5688 dB
+SSIM vs bicubic: +0.193144
+```
+
+Independently reproduced exactly (epoch 38, Val L1 0.033430, Val PSNR 27.7101 dB,
+Val SSIM 0.743748) -- confirms checkpoint loading, model reconstruction, and the
+validation pipeline all remain correct.
+
+## Comparison vs Experiment 6
+
+| Metric      | Exp 6 (96x96 crop) | Exp 7 (128x128 crop) | Exp 7 vs Exp 6 |
+| ----------- | -------------------: | ----------------------: | --------------: |
+| Val L1      |              0.033420 |                 0.033430 |     +0.000010 (negligible) |
+| Val PSNR    |            27.7090 dB |               27.7101 dB |         +0.0011 dB |
+| Val SSIM    |              0.745634 |                 0.743748 |          -0.001886 |
+| Epoch time  |          ~25-27 s     |             ~38-42 s     |    substantially slower |
+
+## Conclusion
+
+Experiment 7 produced **no meaningful improvement** over Experiment 6. The PSNR
+difference (+0.0011 dB) is negligible -- effectively tied -- while SSIM is slightly
+*worse* (-0.001886) and Val L1 is essentially unchanged. At the same time, training on
+the full 128x128 image was substantially slower per epoch (~38-42s vs ~25-27s) for no
+corresponding quality gain, since a full-image batch does strictly more compute per
+step than a 96x96 crop at the same batch size. **96x96 remains the preferred training
+crop size for future experiments** -- Experiment 6 stays the practical best-PSNR
+configuration; Experiment 7 is retained as a completed, neutral (non-improving) result
+that closes off "more crop context" as a further avenue worth pursuing at this
+architecture/data scale.
+
+## Checkpoint Directory
+
+```text
+checkpoints/exp7_crop128/checkpoint_latest.pt
+checkpoints/exp7_crop128/checkpoint_best.pt
+```
+
+Separate from `checkpoints/exp1_baseline/`, `checkpoints/exp2_plateau/`,
+`checkpoints/exp2_fixed40/`, `checkpoints/exp3_capacity/`, `checkpoints/exp4_charbonnier/`,
+`checkpoints/exp5_l1_ssim/`, and `checkpoints/exp6_crop96/`, all of which remain
+untouched. Verified present and byte-identical (SHA-256) before and after this task's
+independent evaluation.
+
+---
+
 # Official Test-Set Inference Sanity Check (infrastructure, not a new experiment)
 
 After independently verifying Experiment 6, a small inference sanity check was run
@@ -1064,7 +1181,14 @@ above, which remains the only quantitative comparison in this log.
 | Exp 3 — Capacity         | 64 features / 8 blocks (7.45x params) |     27.6212 dB |      0.743619 | Complete |
 | Exp 4 — Charbonnier loss | L1 -> Charbonnier (eps=1e-3)          |     27.5881 dB |      0.743230 | Complete |
 | Exp 5 — L1+SSIM loss     | L1 -> L1 + 0.1*(1-SSIM)               |     27.5282 dB |  **0.747377** | Complete |
-| Exp 6 — Larger crop      | 64x64 -> 96x96 LR crop                | **27.7090 dB** |      0.745634 | Complete |
+| Exp 6 — Larger crop      | 64x64 -> 96x96 LR crop                |     27.7090 dB |      0.745634 | Complete |
+| Exp 7 — Full-image crop  | 96x96 -> 128x128 (full image) LR crop | **27.7101 dB** |      0.743748 | Complete |
+
+Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
+(+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and
+Exp 7 is substantially slower per epoch. **Experiment 6 (96x96 crop) remains the
+practical preferred configuration**; Experiment 7 is a completed, neutral result that
+does not change that recommendation.
 
 ---
 
