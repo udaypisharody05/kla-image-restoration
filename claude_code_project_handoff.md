@@ -240,32 +240,52 @@ the fourth architecture/ensembling attempt (after Experiments 9, 11, 12) that
 failed to beat Experiment 6, motivating Experiment 14's pivot away from
 architecture search toward the training recipe itself.
 
-### Experiment 14 (prepared, not yet run — cosine LR schedule)
+### Experiment 14 (completed — rejected; cosine LR schedule)
 
-With four architecture/ensembling attempts exhausted, Experiment 14 holds
-Experiment 6's architecture fixed and changes exactly one variable:
-`ReduceLROnPlateau` → `CosineAnnealingLR` (`--scheduler cosine
---scheduler-t-max 40 --min-lr 1e-6`, i.e. `T_max=40, eta_min=1e-6`).
-`train.py`'s scheduler infrastructure (`build_scheduler_config`/
-`build_scheduler`/new `scheduler_step()` dispatch helper) now supports both
-scheduler types cleanly, with a critical safeguard: `T_max` is always
-explicit and never derived from `--epochs`, so a smoke test or interrupted
-run never silently compresses the intended 40-epoch cosine horizon (verified:
-a 1-epoch smoke run's checkpoint still stores `t_max=40`, and a
-resumed-then-continued run reaches the same final LR as an uninterrupted
-40-epoch run). Resume compatibility mirrors the existing `loss_config`
-pattern — cosine↔plateau and differing `t_max`/`eta_min` are all rejected on
-resume; historical checkpoints (which have no scheduler or a plateau
-scheduler) remain fully compatible. **Next step: the real 40-epoch
-Experiment 14 run**, e.g.:
+With four architecture/ensembling attempts exhausted, Experiment 14 held
+Experiment 6's architecture fixed and changed exactly one variable:
+`ReduceLROnPlateau` → `CosineAnnealingLR` (`T_max=40, eta_min=1e-6`).
+Independently verified (`checkpoints/exp14_cosine/checkpoint_best.pt`, epoch
+38): Val PSNR 27.6011 dB, Val SSIM 0.742668 — **0.1079 dB lower and 0.002966
+lower** than Experiment 6's `ReduceLROnPlateau` result. The smallest gap of
+any rejected experiment so far, but still a clear regression, not noise.
+**Rejected — `ReduceLROnPlateau` remains this project's scheduler of
+choice.** `train.py`'s scheduler infrastructure now cleanly supports both
+scheduler types (`build_scheduler_config`/`build_scheduler`/`scheduler_step()`
+dispatch, with `T_max` always explicit and never derived from `--epochs`,
+and resume compatibility mirroring the existing `loss_config` strict-match
+pattern) — useful infrastructure kept regardless of this result.
+
+### Experiment 15 (prepared, not yet run — extended champion training)
+
+With scheduler substitution (Exp 14) joining architecture/ensembling (Exp 9,
+11, 12, 13) as a failed attempt to beat Experiment 6, Experiment 15 asks a
+simpler question: does the champion configuration benefit from continued
+`ReduceLROnPlateau`-controlled training past its original 40-epoch budget?
+This is a direct **continuation** of Experiment 6's own run, not a new
+architecture or recipe. Resuming from `checkpoints/exp6_crop96/checkpoint_latest.pt`
+(the true end-of-epoch-40 state — not `checkpoint_best.pt`) restores: epoch
+40, best_val_psnr ≈27.7090 dB, and **current LR = 5e-05 exactly** (one
+plateau reduction occurred during the original run, with `num_bad_epochs=2`
+of `patience=3` — not yet exhausted). A dry (read-only) resume verification
+against the real checkpoint confirms `start_epoch=41` and full optimizer/
+scheduler state restoration, with **zero `train.py` code changes needed** —
+`--resume` and `--checkpoint-dir` are already independent, so training can
+resume from `checkpoints/exp6_crop96/checkpoint_latest.pt` while writing only
+to a new `checkpoints/exp15_extended60/` directory, leaving Experiment 6
+fully untouched. If epochs 41-60 never beat ~27.7090 dB, the new directory
+will correctly end up containing only `checkpoint_latest.pt` and no
+`checkpoint_best.pt` — expected, not a bug; `best_val_psnr` is deliberately
+never reset to force a fabricated new-best save. **Next step: the real
+extended run**, e.g.:
 
 ```bash
 python train.py --model residual_sr --num-features 64 --num-blocks 8 \
   --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
-  --scheduler cosine --scheduler-t-max 40 --min-lr 1e-6 \
-  --epochs 40 --checkpoint-dir checkpoints/exp14_cosine
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --epochs 60 --resume checkpoints/exp6_crop96/checkpoint_latest.pt \
+  --checkpoint-dir checkpoints/exp15_extended60
 ```
 
-then compare with `evaluate_checkpoint.py --checkpoint
-checkpoints/exp14_cosine/checkpoint_best.pt` against Experiment 6
-(27.7090 dB / 0.745634). **This run has not been started.**
+then compare against Experiment 6 (27.7090 dB / 0.745634). **This run has
+not been started; epoch 41 has not been run.**

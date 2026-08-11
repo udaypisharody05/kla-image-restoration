@@ -2438,12 +2438,11 @@ are retained for reproducibility, unmodified.
 
 ## Status
 
-**PLANNED / PREPARED.** Scheduler implementation, tests, LR trajectory
-verification, a tiny CUDA sanity step, and a tiny real-data smoke test are
-complete and passing. **No real training run has been started.** The
-smoke-run metrics below are infrastructure-verification artifacts only
-(1 epoch + 1 resumed epoch, 32 train / 16 val samples, freshly initialized
-weights) and must not be compared against any other experiment's numbers.
+**COMPLETED.** The real Experiment 14 training run
+(`checkpoints/exp14_cosine/`, full canonical 40-epoch recipe below) ran to
+completion. The smoke-run metrics further below are infrastructure-
+verification artifacts only (1 epoch + 1 resumed epoch, 32 train / 16 val
+samples, freshly initialized weights) and are unrelated to this real result.
 
 ## Hypothesis
 
@@ -2659,23 +2658,221 @@ not be compared against Experiment 6/9/10/11/12/13.
 SHA-256-hashed before and after this preparation task; every hash is
 unchanged.
 
+## Real Training Run
+
+Exact Experiment 14 configuration (`ResidualSRNet`, 64F/8B, 630,724 params),
+trained with Experiment 6's identical recipe except the scheduler: L1 loss,
+crop96 LR / crop192 GT, batch16, seed42, Adam (initial LR 1e-4),
+`CosineAnnealingLR` (`T_max=40, eta_min=1e-6`), 40 epochs, canonical split,
+full-image validation on all 640 validation samples, best checkpoint selected
+by validation PSNR.
+
+Checkpoint: `checkpoints/exp14_cosine/checkpoint_best.pt`. Independently
+re-verified via `evaluate_checkpoint.py --checkpoint
+checkpoints/exp14_cosine/checkpoint_best.pt --tta none`:
+
+```
+Loaded checkpoint checkpoints/exp14_cosine/checkpoint_best.pt (epoch=38, best_val_psnr=27.601060624152534)
+Training loss: L1 ({'name': 'l1'})
+Validation samples: 640
+Val L1 (diagnostic, always L1 regardless of training loss): 0.033783
+Val PSNR: 27.6011 dB
+Val SSIM: 0.742668
+Bicubic PSNR: 23.1413 dB
+Bicubic SSIM: 0.550604
+PSNR vs bicubic: +4.4598 dB
+SSIM vs bicubic: +0.192064
+```
+
+| Metric | Value |
+| --- | --- |
+| Best epoch | 38 (of 40) |
+| Val L1 | 0.033783 |
+| Val PSNR | 27.6011 dB |
+| Val SSIM | 0.742668 |
+| PSNR vs bicubic | +4.4598 dB |
+| SSIM vs bicubic | +0.192064 |
+
+The checkpoint's stored `model_config` (`residual_sr`, 64F/8B), `loss_config`
+(`l1`), and `scheduler_config` (`{"name": "cosine", "t_max": 40, "eta_min":
+1e-06}`) all confirm the controlled recipe was used exactly as specified.
+
+## Comparison vs Experiment 6
+
+| Metric | Exp 6 (`ReduceLROnPlateau`) | Exp 14 (`CosineAnnealingLR`) | Delta |
+| --- | ---: | ---: | ---: |
+| Val L1 | 0.033420 | 0.033783 | +0.000363 |
+| Val PSNR | 27.7090 dB | 27.6011 dB | **-0.1079 dB** |
+| Val SSIM | 0.745634 | 0.742668 | **-0.002966** |
+
+Both runs share the identical architecture, loss, crop, batch size, seed,
+optimizer, and initial LR -- the scheduler is the only variable that
+changed, isolating its effect cleanly.
+
+## Conclusion
+
+**Cosine annealing did not beat the established `ReduceLROnPlateau`
+schedule.** The smooth, continuous LR decay hypothesized to help late-stage
+convergence instead underperformed the plateau-triggered step schedule by a
+small but clear margin (-0.1079 dB PSNR, -0.002966 SSIM) -- the smallest gap
+of any rejected experiment so far (smaller than Experiments 9, 12, 13's
+architecture-change gaps), but still a real regression, not noise. A
+plausible explanation: `ReduceLROnPlateau` only reduces LR when validation
+PSNR actually stalls, so it can hold a higher LR for longer when the model is
+still improving, whereas cosine's schedule is fixed in advance and can reduce
+LR before the model is done benefiting from a higher one. **Retain
+`ReduceLROnPlateau` as this project's scheduler of choice.** **Experiment 6
+remains the champion checkpoint, and Experiment 6 + x8 TTA (27.7689 dB /
+0.747955) remains the best inference pipeline.** Both
+`checkpoints/exp14_cosine/checkpoint_best.pt` and `checkpoint_latest.pt` are
+retained for reproducibility, unmodified.
+
+---
+
+# Experiment 15 — Extended Champion Training
+
+## Status
+
+**PLANNED / PREPARED.** Resume-state inspection and a dry (read-only) resume
+verification are complete. **No real training has been started; epoch 41 has
+not been run.** This is not a new architecture experiment -- it is a direct
+continuation of Experiment 6's own training run.
+
+## Hypothesis
+
+Experiment 6's original run stopped at its planned 40-epoch budget while
+`ReduceLROnPlateau` had only reduced the LR to 5e-05 (2 bad epochs into a
+patience of 3 at that point -- not yet exhausted). Four different attempts to
+beat Experiment 6 via architecture, ensembling, attention, or an alternative
+scheduler have all failed (Experiments 9, 11, 12, 13, 14). Experiment 15 asks
+a simpler question instead: **does the established champion configuration
+still have room to improve if training simply continues past epoch 40**,
+under the exact same `ReduceLROnPlateau`-controlled recipe that produced it,
+rather than restarting from scratch with any different setting.
+
+## Source Checkpoint: Experiment 6
+
+Resuming from `checkpoints/exp6_crop96/checkpoint_latest.pt` (not
+`checkpoint_best.pt`) is the deliberate choice here, since `checkpoint_latest.pt`
+holds the true end-of-epoch-40 state (model, optimizer, and scheduler as they
+stood after the final epoch), not merely the epoch that happened to score
+best. Inspected directly (read-only; this checkpoint file is never written to
+by inspection):
+
+| Field | Value |
+| --- | --- |
+| Stored epoch | 40 |
+| Stored best_val_psnr | 27.70896924076407 (~27.7090 dB) |
+| `model_config` | `{"in_channels":1,"out_channels":1,"num_features":64,"num_blocks":8,"scale":2}` (`residual_sr`) |
+| `loss_config` | `{"name": "l1"}` |
+| `scheduler_config` | `{"name": "plateau", "mode": "max", "factor": 0.5, "patience": 3, "min_lr": 1e-06}` |
+| `scheduler_state_dict` present | Yes -- `last_epoch=40, best=27.70896924076407, num_bad_epochs=2, cooldown_counter=0, _last_lr=[5e-05]` |
+| `optimizer_state_dict` present | Yes (Adam moment buffers for all 630,724 parameters) |
+| **Current LR** (read directly from `optimizer_state_dict["param_groups"][0]["lr"]`, matches `scheduler_state_dict["_last_lr"]`) | **5e-05 exactly** (one plateau reduction from the initial 1e-4 occurred during the original run) |
+| `training_config.crop_size` | 96 |
+| `training_config.seed` | 42 |
+| `training_config.val_fraction` | 0.2 |
+| `training_config.batch_size` | 16 |
+
+## Dry Resume Verification (read-only -- no training performed)
+
+`load_checkpoint_for_resume` was called directly against the real
+`checkpoints/exp6_crop96/checkpoint_latest.pt`, with a freshly constructed
+matching model/optimizer/`ReduceLROnPlateau` scheduler (identical
+`model_config`/`loss_config`/`scheduler_config` to what Experiment 15 will
+use), to confirm the exact resume state without running any epoch:
+
+| Check | Result |
+| --- | --- |
+| `start_epoch` returned | **41** |
+| `best_val_psnr` returned | 27.70896924076407 |
+| LR after restore (`current_lr(optimizer)`) | 5e-05 (matches source exactly) |
+| `scheduler.best` after restore | 27.70896924076407 |
+| `scheduler.num_bad_epochs` after restore | 2 |
+| `scheduler.cooldown_counter` after restore | 0 |
+| `previous_training_config` returned | Matches the table above exactly (`crop_size=96, seed=42, val_fraction=0.2, batch_size=16`) |
+| Source file SHA-256 after the dry resume | Identical to before (read-only `torch.load`; resuming never writes to the source checkpoint) |
+
+This confirms optimizer state, full `ReduceLROnPlateau` state (not just the
+LR value), and the epoch/best-PSNR bookkeeping all carry over correctly, and
+that resuming is non-destructive to the source checkpoint.
+
+## Output Directory / Existing Infrastructure
+
+**No `train.py` code changes were required or made.** `--resume` (the
+checkpoint to load) and `--checkpoint-dir` (where `checkpoint_latest.pt`/
+`checkpoint_best.pt` are subsequently written) are already fully independent
+CLI arguments -- `--checkpoint-dir` is never derived from `--resume`'s path.
+Experiment 15 will therefore use:
+
+- `--resume checkpoints/exp6_crop96/checkpoint_latest.pt` (source)
+- `--checkpoint-dir checkpoints/exp15_extended60` (destination -- a new,
+  currently-nonexistent directory; Experiment 6's directory is never written
+  to during Experiment 15)
+- `--epochs 60` (so the loop `range(start_epoch, epochs+1)` = `range(41, 61)`
+  runs exactly epochs 41-60 -- 20 additional epochs)
+- Every other flag identical to Experiment 6's original invocation: `--model
+  residual_sr --num-features 64 --num-blocks 8 --loss l1 --crop-size 96
+  --batch-size 16 --seed 42 --lr 1e-4 --scheduler plateau
+  --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6` (the `--lr`
+  flag only sets the *initial* LR for a fresh optimizer; since we resume, the
+  actual starting LR comes from the restored optimizer state -- 5e-05 -- not
+  from this flag)
+
+## Best-Checkpoint Behavior (documented in advance, not worked around)
+
+Experiment 15 resumes with `best_val_psnr` already at 27.70896924076407 (the
+value carried over from Experiment 6, per the dry-resume verification above).
+`checkpoint_best.pt` is only written when a later epoch's validation PSNR
+*exceeds* this inherited value (`train.py`'s existing `is_new_best =
+val_metrics["psnr"] > best_val_psnr` check -- unmodified). **If none of
+epochs 41-60 beat ~27.7090 dB, `checkpoints/exp15_extended60/` will correctly
+contain only `checkpoint_latest.pt` and no `checkpoint_best.pt` -- this is
+valid, expected behavior, not a failure to be worked around.**
+`best_val_psnr` is deliberately **not** reset to force a new-best save; doing
+so would fabricate a "champion" checkpoint from a lower bar than Experiment 6
+actually cleared, invalidating the comparison. If a later epoch genuinely
+exceeds 27.7090 dB, `checkpoint_best.pt` will be saved normally in
+`checkpoints/exp15_extended60/` exactly as `train.py` already does for every
+other experiment.
+
+## Tests
+
+No training-code changes were made (Section 7's "zero code changes if
+already supported" applied), so no new tests were added.
+`pytest -m "not integration" -q` -> **368 passed, 8 deselected** (unchanged
+from Experiment 14 -- confirms nothing regressed).
+
+## Checkpoint Safety
+
+SHA-256-hashed before and after this preparation task (including the dry
+resume verification above, which loads but never writes to
+`checkpoint_latest.pt`):
+`checkpoints/exp6_crop96/{checkpoint_best,checkpoint_latest}.pt`,
+`checkpoints/exp9_edsr_lite/checkpoint_best.pt`,
+`checkpoints/exp12_nafnet_sr/checkpoint_best.pt`,
+`checkpoints/exp13_swinir_lite/checkpoint_best.pt`,
+`checkpoints/exp14_cosine/{checkpoint_best,checkpoint_latest}.pt` -- every
+hash unchanged. **Experiment 6 remains fully immutable.**
+
 ## Result
 
-**TBD.** No real Experiment 14 training run has been started. The next step
-is the real 40-epoch run:
+**TBD.** No real Experiment 15 training run has been started; epoch 41 has
+not been run. The next step is the real extended run:
 
 ```bash
 python train.py --model residual_sr --num-features 64 --num-blocks 8 \
   --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
-  --scheduler cosine --scheduler-t-max 40 --min-lr 1e-6 \
-  --epochs 40 --checkpoint-dir checkpoints/exp14_cosine
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --epochs 60 --resume checkpoints/exp6_crop96/checkpoint_latest.pt \
+  --checkpoint-dir checkpoints/exp15_extended60
 ```
 
-then compare with `evaluate_checkpoint.py --checkpoint
-checkpoints/exp14_cosine/checkpoint_best.pt` against Experiment 6
-(27.7090 dB / 0.745634 dB) to see whether cosine annealing improves
-convergence over `ReduceLROnPlateau` on the identical architecture. **This
-run has not been started.**
+then compare `checkpoints/exp15_extended60/checkpoint_latest.pt` (and
+`checkpoint_best.pt`, if one is produced) against Experiment 6
+(27.7090 dB / 0.745634) to see whether 20 additional
+`ReduceLROnPlateau`-controlled epochs improve on the established champion.
+**This run has not been started.**
 
 ---
 
@@ -2716,7 +2913,8 @@ above, which remains the only quantitative comparison in this log.
 | Exp 11 — Model ensemble  | Weighted average of Exp 6 + Exp 9 raw predictions | 27.7561 dB | 0.747603 | Complete (rejected) |
 | Exp 12 — NAFNet-SR arch  | ResidualSRNet -> NAFNet-style gated blocks (64F/8B, 432K params) | 27.2178 dB | 0.729829 | Complete (rejected, stopped @32) |
 | Exp 13 — SwinIR-lite arch | Convolution -> windowed self-attention (embed60/6 blocks, 348K params) | 27.4361 dB | 0.738432 | Complete (rejected) |
-| Exp 14 — Cosine LR schedule | Exp 6 architecture, ReduceLROnPlateau -> CosineAnnealingLR (T_max=40) | TBD | TBD | Planned / prepared |
+| Exp 14 — Cosine LR schedule | Exp 6 architecture, ReduceLROnPlateau -> CosineAnnealingLR (T_max=40) | 27.6011 dB | 0.742668 | Complete (rejected) |
+| Exp 15 — Extended champion training | Resume Exp 6 latest checkpoint 40 -> 60 epochs, same recipe | TBD | TBD | Planned / prepared |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an
@@ -2742,6 +2940,15 @@ this is the fourth architecture/ensembling attempt (after Exp 9, 11, 12) to
 beat Experiment 6, motivating Experiment 14's shift to tuning the training
 recipe (LR schedule) on the proven Experiment 6 architecture instead of
 further architecture search.
+
+Note: Exp 14 (`CosineAnnealingLR`, T_max=40/eta_min=1e-6, on the identical
+Experiment 6 architecture/recipe) ran the full 40 epochs (best epoch 38) but
+finished -0.1079 dB PSNR / -0.002966 SSIM below Experiment 6's
+`ReduceLROnPlateau` result -- the smallest gap of any rejected experiment so
+far, but still a clear regression. **Rejected; `ReduceLROnPlateau` remains
+this project's scheduler of choice.** Motivates Experiment 15's shift toward
+extending Experiment 6's own training horizon rather than changing the
+recipe further.
 
 Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
 (+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and
