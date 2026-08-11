@@ -6,10 +6,13 @@ lightweight residual CNN (see ``src/models/residual_sr.py``) with L1 loss and
 Adam, validates on the full deterministic 640-image validation split every
 epoch, and checkpoints the latest and best (by validation PSNR) models.
 
-An optional ``ReduceLROnPlateau`` learning-rate scheduler (monitoring
-validation PSNR, ``mode="max"``) can be enabled with ``--scheduler plateau``.
-The default ``--scheduler none`` reproduces Experiment 1's fixed-LR behavior
-exactly.
+An optional learning-rate scheduler can be enabled with ``--scheduler``:
+``plateau`` (``ReduceLROnPlateau``, monitoring validation PSNR, ``mode="max"``)
+or ``cosine`` (``CosineAnnealingLR`` over a fixed, explicitly-configured
+``--scheduler-t-max`` horizon -- never implicitly derived from ``--epochs``,
+so a smoke test run with a small ``--epochs`` does not distort the intended
+schedule). The default ``--scheduler none`` reproduces Experiment 1's
+fixed-LR behavior exactly.
 """
 
 import argparse
@@ -75,10 +78,19 @@ def build_datasets(
     return train_dataset, validation_dataset, len(pairs)
 
 
+Scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau | torch.optim.lr_scheduler.CosineAnnealingLR
+
+
 def build_scheduler_config(
-    scheduler_name: str, factor: float, patience: int, min_lr: float
+    scheduler_name: str, factor: float, patience: int, min_lr: float, t_max: int | None = None
 ) -> dict | None:
-    """Turn CLI scheduler options into a plain, checkpoint-serializable dict."""
+    """Turn CLI scheduler options into a plain, checkpoint-serializable dict.
+
+    *t_max* (cosine only) is the intended full-experiment epoch horizon --
+    callers must pass it explicitly (e.g. ``--scheduler-t-max 40``) rather
+    than deriving it from ``--epochs``, so a short smoke-test run does not
+    silently produce a different (compressed) schedule than the real run.
+    """
     if scheduler_name == "none":
         return None
     if scheduler_name == "plateau":
@@ -89,12 +101,18 @@ def build_scheduler_config(
             "patience": patience,
             "min_lr": min_lr,
         }
+    if scheduler_name == "cosine":
+        if t_max is None or t_max < 1:
+            raise ValueError("--scheduler-t-max must be a positive integer for --scheduler cosine")
+        return {
+            "name": "cosine",
+            "t_max": t_max,
+            "eta_min": min_lr,
+        }
     raise ValueError(f"Unknown scheduler: {scheduler_name}")
 
 
-def build_scheduler(
-    optimizer: torch.optim.Optimizer, scheduler_config: dict | None
-) -> torch.optim.lr_scheduler.ReduceLROnPlateau | None:
+def build_scheduler(optimizer: torch.optim.Optimizer, scheduler_config: dict | None) -> Scheduler | None:
     """Construct the scheduler described by *scheduler_config*, or None."""
     if scheduler_config is None:
         return None
@@ -106,7 +124,26 @@ def build_scheduler(
             patience=scheduler_config["patience"],
             min_lr=scheduler_config["min_lr"],
         )
+    if scheduler_config["name"] == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=scheduler_config["t_max"],
+            eta_min=scheduler_config["eta_min"],
+        )
     raise ValueError(f"Unknown scheduler: {scheduler_config['name']}")
+
+
+def scheduler_step(scheduler: Scheduler, scheduler_config: dict, val_psnr: float) -> None:
+    """Advance *scheduler* by exactly one epoch, using the right call signature
+    for its type: ``ReduceLROnPlateau.step(metric)`` needs this epoch's
+    validation PSNR to decide whether to reduce; ``CosineAnnealingLR.step()``
+    takes no argument -- its schedule is a fixed function of epoch count,
+    independent of validation performance.
+    """
+    if scheduler_config["name"] == "plateau":
+        scheduler.step(val_psnr)
+    else:
+        scheduler.step()
 
 
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
@@ -148,7 +185,7 @@ def save_checkpoint(
     best_val_psnr: float,
     model_config: dict,
     training_config: dict,
-    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None = None,
+    scheduler: Scheduler | None = None,
     scheduler_config: dict | None = None,
     loss_config: dict | None = None,
 ) -> None:
@@ -178,8 +215,9 @@ def load_checkpoint_for_resume(
     optimizer: torch.optim.Optimizer,
     model_config: dict,
     device: torch.device,
-    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None = None,
+    scheduler: Scheduler | None = None,
     loss_config: dict | None = None,
+    scheduler_config: dict | None = None,
 ) -> tuple[int, float, dict]:
     """Restore model/optimizer/(optional) scheduler state from *path*.
 
@@ -192,6 +230,14 @@ def load_checkpoint_for_resume(
     exactly (mirroring the strict ``model_config`` check below) -- a resume
     must never silently switch the reconstruction loss a run is being trained
     against. Pass ``None`` to skip this check (used by tests that don't care).
+
+    *scheduler_config*, when given, must match the checkpoint's stored
+    scheduler config exactly -- same rationale: switching between
+    ``plateau``/``cosine``, or resuming a cosine schedule with a different
+    ``t_max``/``eta_min``, silently changes the learning-rate trajectory a
+    run is being trained against. Pass ``None`` to skip this check (used by
+    tests that don't care, and by callers resuming with ``--scheduler none``
+    where there is nothing to compare).
     """
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     if checkpoint["model_config"] != model_config:
@@ -210,6 +256,17 @@ def load_checkpoint_for_resume(
                 f"Checkpoint loss_config {checkpoint_loss_config} does not match "
                 f"the requested loss_config {loss_config}; pass matching "
                 "--loss/--charbonnier-eps/--ssim-weight to resume."
+            )
+    if scheduler_config is not None:
+        # Checkpoints saved before scheduler support existed have no stored
+        # scheduler_config; every historical run used no scheduler at all, so
+        # None is the only sensible default to compare against.
+        checkpoint_scheduler_config = checkpoint.get("scheduler_config")
+        if checkpoint_scheduler_config != scheduler_config:
+            raise ValueError(
+                f"Checkpoint scheduler_config {checkpoint_scheduler_config} does not match "
+                f"the requested scheduler_config {scheduler_config}; pass matching "
+                "--scheduler/--scheduler-factor/--scheduler-patience/--scheduler-t-max/--min-lr to resume."
             )
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -373,7 +430,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scheduler",
         type=str,
-        choices=["none", "plateau"],
+        choices=["none", "plateau", "cosine"],
         default="none",
         help="LR scheduler. 'none' (default) reproduces Experiment 1's fixed LR.",
     )
@@ -387,7 +444,20 @@ def parse_args() -> argparse.Namespace:
         help="Epochs with no Val PSNR improvement before reducing LR",
     )
     parser.add_argument(
-        "--min-lr", type=float, default=1e-6, help="Lower bound the scheduler will not cross"
+        "--min-lr",
+        type=float,
+        default=1e-6,
+        help="Lower bound the scheduler will not cross (plateau) / eta_min (cosine)",
+    )
+    parser.add_argument(
+        "--scheduler-t-max",
+        type=int,
+        default=40,
+        help=(
+            "CosineAnnealingLR T_max: the intended full-experiment epoch horizon "
+            "(ignored unless --scheduler cosine). Set explicitly -- never derived from "
+            "--epochs, so a short smoke-test run does not compress the real schedule."
+        ),
     )
     parser.add_argument(
         "--loss",
@@ -522,7 +592,8 @@ def main() -> None:
     print(f"Loss: {loss_config}")
 
     scheduler_config = build_scheduler_config(
-        args.scheduler, args.scheduler_factor, args.scheduler_patience, args.min_lr
+        args.scheduler, args.scheduler_factor, args.scheduler_patience, args.min_lr,
+        t_max=args.scheduler_t_max,
     )
     scheduler = build_scheduler(optimizer, scheduler_config)
     if scheduler is not None:
@@ -557,6 +628,7 @@ def main() -> None:
             device,
             scheduler=scheduler,
             loss_config=loss_config,
+            scheduler_config=scheduler_config,
         )
         print(
             f"Resumed from {args.resume}: continuing at epoch {start_epoch} "
@@ -601,7 +673,7 @@ def main() -> None:
         # with no need to replay this epoch's step() call.
         if scheduler is not None:
             previous_lr = current_lr(optimizer)
-            scheduler.step(val_metrics["psnr"])
+            scheduler_step(scheduler, scheduler_config, val_metrics["psnr"])
             new_lr = current_lr(optimizer)
             if new_lr < previous_lr:
                 print("Learning rate reduced:")

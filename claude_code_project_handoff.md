@@ -225,12 +225,47 @@ champion checkpoint; Experiment 6 + x8 TTA (27.7689 dB / 0.747955) remains the
 best inference pipeline.** Both Experiment 12 checkpoints are retained,
 unmodified, for reproducibility.
 
-### Experiment 13 (prepared, not yet run — SwinIR-lite architecture)
+### Experiment 13 (completed — rejected; SwinIR-lite architecture)
 
-Next architecture direction: **window-based self-attention** rather than
-another convolutional design, on the hypothesis that windowed self-attention
-may preserve long-range structural consistency and fine semiconductor edges
-better than the CNN-only architectures tried so far (Experiments 1-9, 12).
-See `EXPERIMENT_LOG.md`'s Experiment 13 entry for the exact chosen
-configuration, CUDA sizing candidates, and the not-yet-run screening command.
-**This run has not been started.**
+Window-based self-attention (`src/models/swinir_lite.py`, embed_dim=60,
+depth=6, num_heads=6, window_size=8, mlp_ratio=2.0, 348,421 params), trained
+with Experiment 6's exact recipe (L1, crop96, batch16, seed42, Adam,
+ReduceLROnPlateau, 40 epochs). Independently verified
+(`checkpoints/exp13_swinir_lite/checkpoint_best.pt`, epoch 38): Val PSNR
+27.4361 dB, Val SSIM 0.738432 — **0.2729 dB lower and 0.007202 lower** than
+Experiment 6. The model trained correctly (no divergence, responded normally
+to LR reductions); windowed self-attention simply didn't outperform the
+proven residual-CNN design at this scale/dataset size. **Rejected.** This is
+the fourth architecture/ensembling attempt (after Experiments 9, 11, 12) that
+failed to beat Experiment 6, motivating Experiment 14's pivot away from
+architecture search toward the training recipe itself.
+
+### Experiment 14 (prepared, not yet run — cosine LR schedule)
+
+With four architecture/ensembling attempts exhausted, Experiment 14 holds
+Experiment 6's architecture fixed and changes exactly one variable:
+`ReduceLROnPlateau` → `CosineAnnealingLR` (`--scheduler cosine
+--scheduler-t-max 40 --min-lr 1e-6`, i.e. `T_max=40, eta_min=1e-6`).
+`train.py`'s scheduler infrastructure (`build_scheduler_config`/
+`build_scheduler`/new `scheduler_step()` dispatch helper) now supports both
+scheduler types cleanly, with a critical safeguard: `T_max` is always
+explicit and never derived from `--epochs`, so a smoke test or interrupted
+run never silently compresses the intended 40-epoch cosine horizon (verified:
+a 1-epoch smoke run's checkpoint still stores `t_max=40`, and a
+resumed-then-continued run reaches the same final LR as an uninterrupted
+40-epoch run). Resume compatibility mirrors the existing `loss_config`
+pattern — cosine↔plateau and differing `t_max`/`eta_min` are all rejected on
+resume; historical checkpoints (which have no scheduler or a plateau
+scheduler) remain fully compatible. **Next step: the real 40-epoch
+Experiment 14 run**, e.g.:
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler cosine --scheduler-t-max 40 --min-lr 1e-6 \
+  --epochs 40 --checkpoint-dir checkpoints/exp14_cosine
+```
+
+then compare with `evaluate_checkpoint.py --checkpoint
+checkpoints/exp14_cosine/checkpoint_best.pt` against Experiment 6
+(27.7090 dB / 0.745634). **This run has not been started.**

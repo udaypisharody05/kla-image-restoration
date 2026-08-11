@@ -2122,12 +2122,11 @@ retained for reproducibility, unmodified.
 
 ## Status
 
-**PLANNED / PREPARED.** Implementation, tests, CUDA memory/runtime search,
-final CUDA sanity, and a tiny real-data smoke test are complete and passing.
-**No real training run has been started.** The smoke-run metrics below are
-infrastructure-verification artifacts only (1 epoch, 32 train / 16 val
-samples, freshly initialized weights) and must not be compared against any
-other experiment's numbers.
+**COMPLETED.** The real Experiment 13 training run
+(`checkpoints/exp13_swinir_lite/`, full canonical 40-epoch recipe below) ran
+to completion. The smoke-run metrics further below are infrastructure-
+verification artifacts only (1 epoch, 32 train / 16 val samples, freshly
+initialized weights) and are unrelated to this real result.
 
 ## Hypothesis
 
@@ -2363,23 +2362,320 @@ and `checkpoints/exp12_nafnet_sr/{checkpoint_best,checkpoint_latest}.pt` were
 SHA-256-hashed before and after this preparation task; every hash is
 unchanged.
 
-## Result
+## Real Training Run
 
-**TBD.** No real Experiment 13 training run has been started. The next step
-is a screening run:
+Exact Experiment 13 configuration (`embed_dim=60, depth=6, num_heads=6,
+window_size=8, mlp_ratio=2.0`, 348,421 parameters), trained with the fully
+controlled recipe: L1 loss, crop96 LR / crop192 GT, batch16, seed42, Adam
+(initial LR 1e-4), ReduceLROnPlateau (factor 0.5, patience 3, min LR 1e-6),
+40 epochs, canonical split, full-image validation on all 640 validation
+samples, best checkpoint selected by validation PSNR -- identical to
+Experiment 6's recipe; only the architecture differs.
 
-```bash
-python train.py --model swinir_lite --embed-dim 60 --depth 6 --num-heads 6 \
-  --window-size 8 --mlp-ratio 2.0 \
-  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
-  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
-  --epochs 15 --checkpoint-dir checkpoints/exp13_swinir_lite
+Checkpoint: `checkpoints/exp13_swinir_lite/checkpoint_best.pt`. Independently
+re-verified via `evaluate_checkpoint.py --checkpoint
+checkpoints/exp13_swinir_lite/checkpoint_best.pt --tta none`:
+
+```
+Loaded checkpoint checkpoints/exp13_swinir_lite/checkpoint_best.pt (epoch=38, best_val_psnr=27.436127608062332)
+Training loss: L1 ({'name': 'l1'})
+Validation samples: 640
+Val L1 (diagnostic, always L1 regardless of training loss): 0.034307
+Val PSNR: 27.4361 dB
+Val SSIM: 0.738432
+Bicubic PSNR: 23.1413 dB
+Bicubic SSIM: 0.550604
+PSNR vs bicubic: +4.2948 dB
+SSIM vs bicubic: +0.187828
 ```
 
-then compare with `evaluate_checkpoint.py --checkpoint checkpoints/exp13_swinir_lite/checkpoint_best.pt`
-against Experiment 6 (27.7090 dB / 0.745634) before deciding whether a full
-40-epoch run or x8 TTA evaluation is warranted. **This run has not been
-started.**
+| Metric | Value |
+| --- | --- |
+| Best epoch | 38 (of 40) |
+| Val L1 | 0.034307 |
+| Val PSNR | 27.4361 dB |
+| Val SSIM | 0.738432 |
+| PSNR vs bicubic | +4.2948 dB |
+| SSIM vs bicubic | +0.187828 |
+
+The checkpoint's stored `model_config` was confirmed identical to the intended
+Experiment 13 configuration, and its `training_config`/`loss_config`/
+`scheduler_config` confirm the controlled recipe (`crop_size=96, batch_size=16,
+seed=42, lr=1e-4`, L1, `ReduceLROnPlateau` factor=0.5/patience=3/min_lr=1e-6)
+was used unchanged.
+
+## Comparison vs Experiment 6
+
+| Metric | Exp 6 (champion) | Exp 13 (SwinIR-lite) | Delta |
+| --- | ---: | ---: | ---: |
+| Val L1 | 0.033420 | 0.034307 | +0.000887 |
+| Val PSNR | 27.7090 dB | 27.4361 dB | **-0.2729 dB** |
+| Val SSIM | 0.745634 | 0.738432 | **-0.007202** |
+| Parameters | 630,724 | 348,421 | 0.552x |
+
+## Conclusion
+
+SwinIR-lite **trained correctly** -- both epoch (38) and the LR-reduction
+pattern implied by `ReduceLROnPlateau` behaved as expected, and the model
+responded to training normally (no divergence, no plateauing failure mode
+like Experiment 12's). It simply **did not beat Experiment 6**: -0.2729 dB
+PSNR / -0.007202 SSIM, a smaller gap than Experiment 12's NAFNet-SR
+(-0.4912 dB) but still a clear, non-noise regression, despite using windowed
+self-attention -- a structurally different mechanism from every convolutional
+architecture tried so far. **Experiment 6 remains the champion checkpoint,
+and Experiment 6 + x8 TTA (27.7689 dB / 0.747955) remains the best inference
+pipeline.** This is the fourth attempt (after Experiments 9, 11, 12) to beat
+Experiment 6 via architecture, ensembling, or attention, and the fourth to
+fall short -- motivating Experiment 14's shift away from architecture
+exploration and toward the training recipe itself (LR schedule) on the
+already-proven Experiment 6 architecture. Both
+`checkpoints/exp13_swinir_lite/checkpoint_best.pt` and `checkpoint_latest.pt`
+are retained for reproducibility, unmodified.
+
+---
+
+# Experiment 14 — Cosine LR Schedule
+
+## Status
+
+**PLANNED / PREPARED.** Scheduler implementation, tests, LR trajectory
+verification, a tiny CUDA sanity step, and a tiny real-data smoke test are
+complete and passing. **No real training run has been started.** The
+smoke-run metrics below are infrastructure-verification artifacts only
+(1 epoch + 1 resumed epoch, 32 train / 16 val samples, freshly initialized
+weights) and must not be compared against any other experiment's numbers.
+
+## Hypothesis
+
+Four attempts to beat Experiment 6 via a different architecture, ensembling,
+or attention have now failed (Experiments 9, 11, 12, 13). Experiment 14
+returns to the proven Experiment 6 architecture (`ResidualSRNet`, 64F/8B,
+630,724 params) and changes exactly one variable: the learning-rate
+schedule, `ReduceLROnPlateau` -> `CosineAnnealingLR`. The hypothesis is that
+a smooth, monotonic LR decay may improve convergence over plateau-triggered
+step reductions -- `ReduceLROnPlateau` only reduces LR after `patience`
+epochs of stagnation, producing a staircase schedule with potentially long
+stretches at a too-high or too-low LR; cosine annealing instead decays
+continuously across the whole run, which is often reported to help late-stage
+fine convergence in image restoration/SR literature. Everything else
+(architecture, loss, crop, batch, seed, optimizer, initial LR, split,
+validation, metrics, checkpoint-selection criterion) is held fixed to isolate
+this one variable.
+
+## Scheduler Implementation
+
+`train.py`'s existing scheduler infrastructure (`build_scheduler_config`,
+`build_scheduler`, checkpoint save/resume) is extended, not replaced:
+
+- `build_scheduler_config(scheduler_name, factor, patience, min_lr, t_max=None)`
+  gains a `"cosine"` branch returning
+  `{"name": "cosine", "t_max": t_max, "eta_min": min_lr}`. `t_max` is
+  **required** for `"cosine"` (raises `ValueError` if missing/non-positive) --
+  it is never derived from `--epochs`, so an interrupted or smoke-test run
+  with a small `--epochs` cannot silently compress the intended horizon.
+  `"plateau"`/`"none"` behavior is byte-for-byte unchanged.
+- `build_scheduler` gains a matching `"cosine"` branch constructing
+  `torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max,
+  eta_min=eta_min)`.
+- A new `scheduler_step(scheduler, scheduler_config, val_psnr)` helper
+  centralizes the one place stepping behavior must differ by scheduler type
+  (see below), replacing the previous unconditional
+  `scheduler.step(val_metrics["psnr"])` call in the training loop.
+- `save_checkpoint`/`load_checkpoint_for_resume`'s scheduler-related type
+  hints were widened from `ReduceLROnPlateau | None` to a new
+  `Scheduler = ReduceLROnPlateau | CosineAnnealingLR` alias; no behavioral
+  change to either function beyond the new optional mismatch check below.
+
+### Exact scheduler config
+
+```python
+{
+    "name": "cosine",
+    "t_max": 40,
+    "eta_min": 1e-6,
+}
+```
+
+## Stepping Behavior
+
+`ReduceLROnPlateau.step(metric)` and `CosineAnnealingLR.step()` have
+different signatures -- the former needs this epoch's validation PSNR to
+decide whether to reduce; the latter takes no argument, since its schedule is
+a fixed function of epoch count alone. `scheduler_step()` dispatches on
+`scheduler_config["name"]`:
+
+```python
+def scheduler_step(scheduler, scheduler_config, val_psnr):
+    if scheduler_config["name"] == "plateau":
+        scheduler.step(val_psnr)
+    else:
+        scheduler.step()
+```
+
+**Exactly when this happens, unchanged from before cosine existed:** once per
+epoch, immediately after `validate()` returns (so this epoch's validation
+PSNR is available for plateau) and before `save_checkpoint()` (so the LR
+saved into `checkpoint_latest.pt`/`checkpoint_best.pt` already reflects this
+epoch's step -- a resume just continues from epoch+1 without needing to
+replay the step). `train_one_epoch`'s inner per-batch loop is untouched;
+`scheduler.step()` is still only ever called once per *epoch*, matching
+`ReduceLROnPlateau`'s existing cadence -- `CosineAnnealingLR` follows the
+identical cadence rather than a per-batch schedule, keeping "one scheduler
+step = one epoch" true for both.
+
+## LR Trajectory Verification (T_max=40, eta_min=1e-6, initial LR=1e-4)
+
+Computed by driving `build_scheduler`+`scheduler_step` through 40 steps with
+the exact Experiment 14 config (correctness check only -- the schedule is not
+tuned based on these values):
+
+| Epoch | LR |
+| --- | ---: |
+| 1 | 9.98474080e-05 |
+| 5 | 9.62320369e-05 |
+| 10 | 8.55017857e-05 |
+| 20 | 5.05000000e-05 |
+| 30 | 1.54982143e-05 |
+| 35 | 4.76796314e-06 |
+| 40 | 1.00000000e-06 (= eta_min exactly) |
+
+Monotonically non-increasing throughout, reaches exactly `eta_min` at epoch
+40, and never drops below `eta_min` even if stepped past epoch 40 (cosine
+holds at `eta_min` thereafter -- verified by a dedicated test).
+
+## CLI
+
+- `--scheduler` gains the `"cosine"` choice: `{none, plateau, cosine}`.
+  Default remains `"none"` (Experiment 1's fixed-LR behavior, unchanged).
+- New `--scheduler-t-max` (default `40`, the standard experiment horizon
+  used throughout this project) -- ignored unless `--scheduler cosine`.
+- `--min-lr` is reused as `eta_min` for cosine (already existed for
+  plateau's floor) -- no separate `--eta-min` flag needed.
+- Experiment 14 requests exactly: `--scheduler cosine --scheduler-t-max 40
+  --min-lr 1e-6`.
+
+## Resume Compatibility
+
+`load_checkpoint_for_resume` gains an optional `scheduler_config` parameter,
+mirroring the existing `loss_config` strict-equality pattern exactly: when
+the caller passes a `scheduler_config` (as `train.py --resume` always now
+does), it must equal the checkpoint's stored `scheduler_config` exactly or a
+`ValueError` is raised; passing `None` (the default, used by tests and by
+`--scheduler none` resumes) skips the check entirely. Verified by test:
+
+- Matching cosine checkpoint + cosine config (same `t_max`/`eta_min`) ->
+  resume succeeds; LR and full scheduler state (`last_epoch`, `base_lrs`,
+  etc.) restored exactly.
+- Cosine checkpoint + plateau config -> rejected.
+- Plateau checkpoint + cosine config -> rejected.
+- Cosine checkpoint, different `t_max` -> rejected.
+- Cosine checkpoint, different `eta_min` -> rejected.
+- No `scheduler_config` passed -> check skipped, preserving every historical
+  no-scheduler-config-comparison resume path (Experiments 1-13) exactly as
+  it worked before this change.
+- A resumed 15-epoch-then-continued-to-40 cosine run reaches the identical
+  final LR as an uninterrupted 40-epoch run (fixed `T_max=40` horizon, not
+  re-derived from the resume point).
+
+## Tests
+
+16 new tests appended to `tests/test_scheduler_unit.py`: config
+construction/validation, scheduler construction, monotonic LR decrease,
+never-below-`eta_min`, exact `eta_min` at `T_max`, cosine stepping ignoring
+the PSNR argument, plateau stepping still using it (unchanged), checkpoint
+storage of cosine state, resume restoring LR/scheduler state, resumed vs.
+uninterrupted trajectory equivalence, all 4 mismatch-rejection directions,
+and the `scheduler_config=None` legacy-skip path. All pre-existing plateau
+tests are untouched and still pass, confirming plateau behavior is unchanged.
+
+`pytest -m "not integration" -q` -> **368 passed, 8 deselected** (up from
+352; every pre-existing test, including all model/TTA/ensemble/loss tests,
+remains unchanged and passing).
+
+## CUDA Sanity Check
+
+Experiment 14 reuses Experiment 6's exact architecture, so no sustained
+benchmark was run -- only a tiny single-step correctness check: `batch=16`,
+`input=[16,1,96,96]`, `ResidualSRNet` 64F/8B, `L1`, `Adam`, cosine scheduler,
+one forward -> backward -> `optimizer.step()` -> `scheduler_step()`.
+
+| Check | Result |
+| --- | --- |
+| Device | NVIDIA GeForce RTX 4060 Laptop GPU (CUDA) |
+| Parameter count | 630,724 |
+| Output shape | `(16, 1, 192, 192)` (matches expected exactly) |
+| Output finite | True |
+| Loss finite | True |
+| All gradients finite | True |
+| LR after one `scheduler_step()` | 9.984740801978984e-05 (matches the epoch-1 trajectory value above) |
+| Peak allocated CUDA memory | 773.9 MiB |
+| Peak reserved CUDA memory | 876.0 MiB |
+| OOM | None |
+
+As expected, memory usage is essentially identical to Experiment 6 (same
+architecture) and far below the 8 GB budget -- no sizing search was needed.
+
+## Real-Data Smoke Test (infrastructure verification only -- not a result)
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler cosine --scheduler-t-max 40 --min-lr 1e-6 \
+  --epochs 1 --max-train-samples 32 --max-val-samples 16 \
+  --checkpoint-dir checkpoints/exp14_cosine_smoke --num-workers 0
+```
+
+Verified and then deleted (`checkpoints/exp14_cosine_smoke/`, not committed):
+
+- CUDA used; printed `Model: residual_sr (630,724 trainable parameters)` and
+  `Scheduler: {'name': 'cosine', 't_max': 40, 'eta_min': 1e-06}`.
+- **Critical check:** despite `--epochs 1`, the checkpoint's stored
+  `scheduler_config` is `{"name": "cosine", "t_max": 40, "eta_min": 1e-06}`
+  -- the full 40-epoch horizon, not silently compressed to match the 1-epoch
+  smoke run. `scheduler_state_dict` shows `"T_max": 40` and `"last_epoch": 1`
+  (one step taken, against a 40-epoch horizon). Training printed "Learning
+  rate reduced: 1.000000e-04 -> 9.984741e-05", matching the epoch-1
+  trajectory value above exactly.
+- `evaluate_checkpoint.py --tta none` loaded the smoke checkpoint and ran to
+  completion with finite metrics.
+- Resume verified: re-ran with `--resume checkpoints/exp14_cosine_smoke/checkpoint_latest.pt
+  --epochs 2`; scheduler state restored ("Restored scheduler state from
+  checkpoint."), LR continued from 9.984741e-05 (not reset to 1e-4), and
+  after the second step reduced further to 9.939057e-05 -- the correct
+  epoch-2 point on the same continuous 40-epoch curve, not a fresh 2-epoch
+  schedule.
+- No historical checkpoint was read or written during this test.
+
+The smoke run's own PSNR/SSIM numbers are **not an experiment result** and
+are recorded here only as evidence the pipeline works end-to-end; they must
+not be compared against Experiment 6/9/10/11/12/13.
+
+## Checkpoint Safety
+
+`checkpoints/exp6_crop96/checkpoint_best.pt`,
+`checkpoints/exp9_edsr_lite/checkpoint_best.pt`,
+`checkpoints/exp12_nafnet_sr/checkpoint_best.pt`, and
+`checkpoints/exp13_swinir_lite/{checkpoint_best,checkpoint_latest}.pt` were
+SHA-256-hashed before and after this preparation task; every hash is
+unchanged.
+
+## Result
+
+**TBD.** No real Experiment 14 training run has been started. The next step
+is the real 40-epoch run:
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler cosine --scheduler-t-max 40 --min-lr 1e-6 \
+  --epochs 40 --checkpoint-dir checkpoints/exp14_cosine
+```
+
+then compare with `evaluate_checkpoint.py --checkpoint
+checkpoints/exp14_cosine/checkpoint_best.pt` against Experiment 6
+(27.7090 dB / 0.745634 dB) to see whether cosine annealing improves
+convergence over `ReduceLROnPlateau` on the identical architecture. **This
+run has not been started.**
 
 ---
 
@@ -2419,7 +2715,8 @@ above, which remains the only quantitative comparison in this log.
 | Exp 10 — x8 geometric TTA | Inference-only self-ensemble on Exp 6 checkpoint | **27.7689 dB** | **0.747955** | Complete |
 | Exp 11 — Model ensemble  | Weighted average of Exp 6 + Exp 9 raw predictions | 27.7561 dB | 0.747603 | Complete (rejected) |
 | Exp 12 — NAFNet-SR arch  | ResidualSRNet -> NAFNet-style gated blocks (64F/8B, 432K params) | 27.2178 dB | 0.729829 | Complete (rejected, stopped @32) |
-| Exp 13 — SwinIR-lite arch | Convolution -> windowed self-attention (embed60/6 blocks, 348K params) | TBD | TBD | Planned / prepared |
+| Exp 13 — SwinIR-lite arch | Convolution -> windowed self-attention (embed60/6 blocks, 348K params) | 27.4361 dB | 0.738432 | Complete (rejected) |
+| Exp 14 — Cosine LR schedule | Exp 6 architecture, ReduceLROnPlateau -> CosineAnnealingLR (T_max=40) | TBD | TBD | Planned / prepared |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an
@@ -2437,6 +2734,14 @@ epoch 32 of a planned 40 after clearly plateauing (+0.0464 dB over epochs 25-32)
 well below Experiment 6 (-0.4912 dB PSNR / -0.015805 SSIM). **Rejected**; see
 the full Experiment 12 entry above for the GPU-sizing finding that shaped its
 configuration and the plateau data behind the stop decision.
+
+Note: Exp 13 (SwinIR-lite, embed_dim=60/depth=6/heads=6/window=8, 348,421
+params) ran the full 40 epochs and trained correctly (best epoch 38), but
+finished -0.2729 dB PSNR / -0.007202 SSIM below Experiment 6. **Rejected**;
+this is the fourth architecture/ensembling attempt (after Exp 9, 11, 12) to
+beat Experiment 6, motivating Experiment 14's shift to tuning the training
+recipe (LR schedule) on the proven Experiment 6 architecture instead of
+further architecture search.
 
 Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
 (+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and
