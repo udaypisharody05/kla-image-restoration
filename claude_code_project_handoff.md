@@ -371,3 +371,52 @@ python train.py --model residual_sr --num-features 64 --num-blocks 8 \
 
 then compare against the current champion pipeline, Experiment 16 + x8 TTA
 (27.8154 dB / 0.750571 / 0.032998). **This run has not been started.**
+
+### ⚠ Experiments 19-21 (EMA runs) executed but never written up
+
+Observed 2026-08-11 while running the Experiment 21 degradation analysis, from
+checkpoint metadata only (nothing re-evaluated, nothing altered):
+
+| checkpoint | epoch | stored `best_val_psnr` |
+| --- | ---: | ---: |
+| `checkpoints/exp19_ema/` | 60 | 27.828210 |
+| `checkpoints/exp20_ema_extended70/` | 70 | 27.884964 |
+| `checkpoints/exp21_ema_extended80/` | 80 | 27.938326 |
+
+EMA clearly helped (Exp 16's non-TTA champion was 27.7656 dB). Two open items
+for a human: (1) these three runs still need proper write-ups with an
+independent `evaluate_checkpoint.py` pass; (2) **the identifier "Experiment 21"
+is used twice** — by `exp21_ema_extended80` and by the degradation analysis
+below. Note `exp21_ema_extended80`'s 27.938326 dB (no TTA) already exceeds the
+27.9293 dB usually cited for "Exp 20 + x8 TTA", so the champion designation may
+be stale.
+
+### Experiment 21 (completed — analysis only; dataset degradation forensics)
+
+**Not a training experiment.** `src/degradation.py` + `analyze_degradation.py`
+characterize the GT 256x256 -> NoisyLR 128x128 process across all 3,200 training
+pairs. Full outputs in
+[`results/degradation_analysis/`](results/degradation_analysis/degradation_report.md).
+Two findings dominate:
+
+1. **Noise is strongly signal dependent** (multiplicative/speckle-like): residual
+   std climbs 0.0120 -> 0.1631 across intensity (13.6x), fitting
+   `var(I) = -6.19e-05 + 0.00653·I + 0.0201·I²` at **R² = 0.9995**. Plain L1
+   assumes homoscedastic noise, so the current recipe mis-weights the image.
+   Residual std (0.0897) is ~2.8x the champion's validation L1 — the task is
+   **noise-dominated, not resolution-dominated**.
+2. **119 repeated-scene groups covering 250 images** (same GT, independent noise
+   draws), all recoverable from filenames (ID gap ≤ 2). **36 groups straddle the
+   canonical split**, giving 38/640 (5.9%) validation images a train twin — so
+   absolute validation numbers are slightly optimistic. Cross-experiment
+   comparisons remain valid (identical split throughout) and **the split was not
+   changed**.
+
+Ruled out with evidence: fixed-pattern noise (ratio 1.01), pre-downsampling blur
+(0.328%), gain/bias calibration (0.14%), spatial correlation (max 0.051),
+frequency-domain structure, and discrete degradation regimes.
+
+**Recommended next (Experiment 22), ranked:** (1) variance-stabilizing transform
+or `1/sqrt(var(I))`-weighted loss — **HIGH**; (2) signal-dependent synthetic-noise
+augmentation — **MEDIUM-HIGH**; (3) scene-group-aware training/validation —
+**MEDIUM**. **No Experiment 22 work has been started.**

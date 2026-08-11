@@ -3603,6 +3603,136 @@ run has not been started.**
 
 ---
 
+# ⚠ Documentation gap: Experiments 19-21 training runs are undocumented
+
+Recorded during Experiment 21's degradation analysis (2026-08-11) as a factual
+observation about repository state — **no experiment result below has been
+verified, re-evaluated, or altered here.**
+
+The Experiment 19 section above still reads "PLANNED / PREPARED", but three EMA
+training runs have since been executed and their checkpoint directories exist:
+
+| checkpoint directory | stored epoch | stored `best_val_psnr` | `ema_config` |
+| --- | ---: | ---: | --- |
+| `checkpoints/exp19_ema/` | 60 | 27.828210 | decay 0.999 |
+| `checkpoints/exp20_ema_extended70/` | 70 | 27.884964 | decay 0.999 |
+| `checkpoints/exp21_ema_extended80/` | 80 | 27.938326 | decay 0.999 |
+
+These figures are read directly from each checkpoint's stored metadata, not
+re-measured. Two things need a human decision:
+
+1. **Experiments 19, 20 and 21 (the EMA runs) have no write-up.** They should be
+   closed properly — including an independent `evaluate_checkpoint.py` pass — the
+   way every other experiment in this log was.
+2. **The identifier "Experiment 21" is used twice.** A training run already owns
+   `checkpoints/exp21_ema_extended80/`, and the degradation analysis below was
+   also named Experiment 21 by instruction. One of the two should be renumbered
+   before this log is relied on.
+
+Note also that `exp21_ema_extended80`'s stored 27.938326 dB (no TTA) already
+exceeds the 27.9293 dB currently cited for Experiment 20 + x8 TTA, so the
+"current champion" designation may itself be out of date. **Not acted on here.**
+
+---
+
+# Experiment 21 — Dataset Degradation Forensics
+
+## Status
+
+**COMPLETED — analysis only.** This is **not a training experiment**: no model
+was trained, loaded, or evaluated, no checkpoint was created or modified, and no
+result in this log was changed. It characterizes the dataset's
+GT 256x256 -> NoisyLR 128x128 degradation so that Experiment 22's modeling
+strategy can be chosen from measured evidence.
+
+## Objective
+
+Find exploitable structure in the degradation process that could enable a
+substantially better model, rather than another incremental hyperparameter gain.
+Experiments 9, 11, 12, 13, 14, 17 and 18 all failed to beat the champion by
+changing architecture, loss, scheduler or ensembling — suggesting the remaining
+headroom lies in the *data*, not the model.
+
+## Method
+
+- `src/degradation.py` — pure, unit-tested analysis primitives.
+- `analyze_degradation.py` — driver over all **3,200 canonical training pairs**.
+- Full outputs: [`results/degradation_analysis/degradation_report.md`](results/degradation_analysis/degradation_report.md)
+  and [`degradation_report.json`](results/degradation_analysis/degradation_report.json),
+  plus six diagnostic plots in the same directory.
+
+Central quantity is the residual `r = NoisyLR - downsample(GT)`, which bundles
+sensor noise, blur mismatch, resampling-phase error and quantization; separating
+those is what the analysis does.
+
+## Headline findings
+
+| question | measured answer |
+| --- | --- |
+| Best GT->LR model | `bicubic` (MSE 0.008042); all 8 candidates within 29% of each other |
+| Systematic gain/bias | None worth correcting: global `a=0.9947, b=+0.0023`; per-image affine correction recovers only **0.14%** of MSE |
+| Residual magnitude | std **0.0897**, skew +0.408, excess kurtosis **+3.459** (heavy-tailed) |
+| iid? | **No** |
+| Signal dependent? | **Yes, strongly** — std rises 0.0120 -> 0.1631 across intensity (**13.6x**); `var(I) = -6.19e-05 + 0.00653·I + 0.0201·I²`, **R² = 0.9995** |
+| Spatially correlated? | **No** — max abs autocorrelation 0.051 at any tested offset |
+| Fixed pattern? | **No** — mean-residual map std 0.001598 vs 0.001585 expected from pure noise (ratio **1.01**) |
+| Frequency structure? | **No** — flat spectrum, no periodic peaks, H/V power ratio 1.026 |
+| Pre-downsampling blur? | **Negligible** — best sigma 0.4, only **0.328%** MSE gain |
+| Multiple regimes? | **No** — per-image noise correlates **+0.899** with image brightness; spread is brightness, not discrete classes |
+| Repeated scenes? | **Yes** — see below |
+| Train vs validation | Distributionally matched (all deltas negligible) |
+
+## The two most important discoveries
+
+**1. The noise is strongly signal dependent (multiplicative/speckle-like).**
+Residual variance grows ~quadratically with intensity, fitting a simple
+closed-form model at R² = 0.9995. Plain L1 assumes homoscedastic noise, so the
+current recipe systematically over-weights bright noisy pixels and under-weights
+dark clean ones. For scale, the residual std (0.0897) is ~2.8x the validation L1
+the champion pipeline achieves — the task is **noise-dominated, not
+resolution-dominated**.
+
+**2. Repeated scenes exist, and they leak across the split.**
+Zero byte-identical GTs, but **119 confirmed repeated-scene groups covering 250
+images** (GT MSE < 0.001, mean 0.000108 — versus mean *LR* MSE 0.014416 within
+the same groups, i.e. one clean scene under independent noise draws). Every
+confirmed pair sits at filename ID gap ≤ 2, so **filenames encode the grouping**.
+**36 groups straddle the canonical split, giving 38 of 640 validation images
+(5.9%) a near-identical twin in train** — absolute validation numbers are
+therefore slightly optimistic. This does not invalidate any cross-experiment
+comparison in this log (all used the identical split), and **the split was left
+unchanged**.
+
+## Ranked recommendations for Experiment 22
+
+1. **Variance-stabilizing transform / noise-aware loss — HIGH.** Directly targets
+   the strongest measured structure (13.6x variance span, R² 0.9995). Either train
+   in a generalized-Anscombe-transformed space and invert at inference, or weight
+   the existing L1 by `1/sqrt(var(I))` from the fitted coefficients. Cheap to bolt
+   onto the champion recipe.
+2. **Signal-dependent synthetic-noise augmentation — MEDIUM-HIGH.** The corruption
+   process is now characterized, so unlimited synthetic pairs can be generated from
+   2,560 GTs. Capped below HIGH because the fit matches aggregate variance while
+   the measured excess kurtosis (+3.459) shows heavier tails than a matched Gaussian.
+3. **Scene-group-aware training/validation — MEDIUM.** Enables Noise2Noise-style
+   consistency terms across the repeated observations, and a cleaner group-aware
+   validation split. Capped by the fact that only 7.8% of the dataset is involved.
+
+Self-supervised (blind-spot / SURE) objectives are statistically admissible here —
+noise is zero-mean (+0.000008) and spatially white — but rank below the above
+because paired GT already exists.
+
+**Deprioritized (LOW), with evidence:** fixed-pattern subtraction (ratio 1.01),
+deblurring/kernel estimation (0.328%), per-image gain/bias calibration (0.14%),
+degradation-regime classification (no clusters), further resampling-kernel search
+(all candidates far below the noise floor).
+
+## Result
+
+Analysis complete. **No model trained; no Experiment 22 work started.**
+
+---
+
 # Official Test-Set Inference Sanity Check (infrastructure, not a new experiment)
 
 After independently verifying Experiment 6, a small inference sanity check was run
@@ -3647,7 +3777,10 @@ above, which remains the only quantitative comparison in this log.
 | Exp 17 — Bicubic residual learning | ResidualSR learned branch + fixed bicubic global skip, trained from scratch | 27.7460 dB | 0.748557 | Complete |
 | Exp 17 + x8 TTA | Inference-only self-ensemble on Exp 17 checkpoint | 27.7942 dB | 0.750434 | Complete |
 | Exp 18 — Exp16+Exp17 ensemble | Weighted average of Exp 16 + Exp 17 raw predictions (best: 75/25 + x8) | 27.8149 dB | 0.750692 | Complete (rejected) |
-| Exp 19 — EMA weight averaging | ResidualSRNet 64F/8B, exponential moving average of weights (decay=0.999) | TBD | TBD | Planned / prepared |
+| Exp 19 — EMA weight averaging | ResidualSRNet 64F/8B, exponential moving average of weights (decay=0.999) | TBD | TBD | Run executed, **write-up missing** |
+| Exp 20 — EMA extended to 70 epochs | Continuation of Exp 19 | TBD | TBD | Run executed, **write-up missing** |
+| Exp 21 — EMA extended to 80 epochs | Continuation of Exp 20 | TBD | TBD | Run executed, **write-up missing**; identifier collides with the analysis below |
+| Exp 21 — Degradation forensics | **Analysis only**, no training: characterizes GT -> NoisyLR | n/a | n/a | Complete |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an

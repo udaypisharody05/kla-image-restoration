@@ -31,5 +31,10 @@ wandb/
 .DS_Store
 Thumbs.db
 __MACOSX/
-# Generated test inference outputs
+# Generated test-set inference outputs (~9MB each of predictions/PNGs per run).
+# Analysis reports under results/ (dataset_report.*, bicubic_baseline.json,
+# degradation_analysis/) are small and ARE tracked -- only these bulky
+# per-run inference dumps are excluded.
 results/test_sanity_exp6/
+results/test_exp20_x8/
+results/test_sanity_exp20/
