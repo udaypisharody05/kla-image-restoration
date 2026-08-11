@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -10,6 +10,9 @@ from torch.utils.data import DataLoader, Dataset
 
 from .dataset_discovery import ImagePair
 from .io_utils import load_image_array
+
+if TYPE_CHECKING:  # avoids a runtime import cycle; only needed for the annotation
+    from .synthetic_noise import SyntheticNoiseAugmentation
 
 
 Sample = dict[str, torch.Tensor | str]
@@ -38,7 +41,17 @@ def _grayscale_tensor(array: np.ndarray, path: Path, role: str) -> torch.Tensor:
 
 
 class PairedRestorationDataset(Dataset[Sample]):
-    """Lazily load existing discovered input/target pairs as float32 tensors."""
+    """Lazily load existing discovered input/target pairs as float32 tensors.
+
+    ``synthetic_noise`` (Experiment 24) optionally replaces the *loaded* real
+    NoisyLR tensor with one synthesized from the same sample's GT, before any
+    cropping or geometric augmentation runs. Substituting at full resolution is
+    what keeps alignment free: the synthetic tensor has exactly the same spatial
+    layout as the real LR it replaces, so the existing aligned-crop transform
+    handles it identically and GT/LR can never desynchronize. Files on disk are
+    never modified. Leave it ``None`` (the default) for validation -- synthetic
+    inputs must never reach a reported metric.
+    """
 
     def __init__(
         self,
@@ -48,12 +61,19 @@ class PairedRestorationDataset(Dataset[Sample]):
             [torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
         ]
         | None = None,
+        synthetic_noise: "SyntheticNoiseAugmentation | None" = None,
     ) -> None:
         if scale < 1:
             raise ValueError("scale must be a positive integer")
         self.pairs = tuple(pairs)
         self.scale = scale
         self.transform = transform
+        self.synthetic_noise = synthetic_noise
+
+    def set_epoch(self, epoch: int) -> None:
+        """Advance the synthetic-noise stream (no-op when augmentation is off)."""
+        if self.synthetic_noise is not None:
+            self.synthetic_noise.set_epoch(epoch)
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -75,6 +95,14 @@ class PairedRestorationDataset(Dataset[Sample]):
                 f"{(input_height, input_width)}, target={(target_height, target_width)}, "
                 f"expected={expected_shape}, pair={pair.pair_id}"
             )
+        is_synthetic = False
+        if self.synthetic_noise is not None:
+            synthesized = self.synthetic_noise.maybe_synthesize(target_tensor, index)
+            if synthesized is not None:
+                # Same [C,H,W] layout as the real LR, so every downstream
+                # transform behaves identically and alignment is preserved.
+                input_tensor = synthesized
+                is_synthetic = True
         if self.transform is not None:
             input_tensor, target_tensor = self.transform(input_tensor, target_tensor)
             if not isinstance(input_tensor, torch.Tensor) or not isinstance(
@@ -104,6 +132,9 @@ class PairedRestorationDataset(Dataset[Sample]):
             "input": input_tensor,
             "target": target_tensor,
             "filename": pair.input_path.name,
+            # Lets tests and diagnostics confirm which stream a sample came from
+            # without re-deriving the augmentation's decision.
+            "synthetic": is_synthetic,
         }
 
 

@@ -110,16 +110,21 @@ with different thermal settings than it was originally trained with is always le
 (thermal settings are recorded in `training_config` for reference only, never checked on
 resume).
 
-## Current best model (updated after Experiment 16; see EXPERIMENT_LOG.md for full history)
+## Current best model (updated after Experiment 23; see EXPERIMENT_LOG.md for full history)
 
-**Experiment 16 (`checkpoints/exp16_extended70/checkpoint_best.pt`, epoch 65) is the
-current champion checkpoint** — ResidualSRNet, 64 features / 8 residual blocks
-(630,724 params), same architecture/recipe as Experiment 6, extended via
-Experiments 15→16's continued `ReduceLROnPlateau`-controlled training (epochs
-41-70 total). Independently verified: Val PSNR 27.7656 dB, Val SSIM 0.748618,
-Val L1 0.033206 (non-TTA). **Experiment 16 + x8 TTA is the current best overall
-pipeline**: Val PSNR 27.8154 dB, Val SSIM 0.750571, Val L1 0.032998
-(+4.6741 dB / +0.199967 over the 23.1413 dB / 0.550604 bicubic baseline).
+**Experiment 23 (`checkpoints/exp23_ema_extended90/checkpoint_best.pt`, epoch 90)
+is the current champion checkpoint** — ResidualSRNet, 64 features / 8 residual
+blocks (630,724 params), same recipe as Experiment 6 but with EMA (decay 0.999)
+and training extended to 90 epochs. Independently verified: Val PSNR 27.9893 dB,
+Val SSIM 0.756916, Val L1 0.032443 (non-TTA). **Experiment 23 + x8 TTA is the
+current best overall pipeline**: Val PSNR **28.0355 dB**, Val SSIM **0.758519**,
+Val L1 **0.032264** (+4.8942 dB / +0.207915 over the 23.1413 dB / 0.550604
+bicubic baseline). Note `evaluate_checkpoint.py` loads EMA weights by default
+when a checkpoint has them, so these numbers come straight from the normal
+command.
+
+Experiment 16 (`checkpoints/exp16_extended70/checkpoint_best.pt`, epoch 65) was
+the previous champion at 27.7656 dB non-TTA / 27.8154 dB with x8 TTA.
 
 Experiment 6 (`checkpoints/exp6_crop96/checkpoint_best.pt`) remains the original,
 from-scratch champion and the recipe every later experiment is still compared
@@ -383,15 +388,14 @@ checkpoint metadata only (nothing re-evaluated, nothing altered):
 | `checkpoints/exp20_ema_extended70/` | 70 | 27.884964 |
 | `checkpoints/exp21_ema_extended80/` | 80 | 27.938326 |
 
-EMA clearly helped (Exp 16's non-TTA champion was 27.7656 dB). Two open items
-for a human: (1) these three runs still need proper write-ups with an
-independent `evaluate_checkpoint.py` pass; (2) **the identifier "Experiment 21"
-is used twice** — by `exp21_ema_extended80` and by the degradation analysis
-below. Note `exp21_ema_extended80`'s 27.938326 dB (no TTA) already exceeds the
-27.9293 dB usually cited for "Exp 20 + x8 TTA", so the champion designation may
-be stale.
+EMA clearly helped (Exp 16's non-TTA champion was 27.7656 dB) and the trend
+continued into Experiment 23. These three runs still need proper write-ups with
+an independent `evaluate_checkpoint.py` pass. **Numbering was resolved on
+2026-08-11**: the degradation analysis is Experiment 22 (it had briefly shared
+"21" with `exp21_ema_extended80`), Experiment 23 is the EMA e90 champion, and
+Experiment 24 is synthetic noise augmentation.
 
-### Experiment 21 (completed — analysis only; dataset degradation forensics)
+### Experiment 22 (completed — analysis only; dataset degradation forensics)
 
 **Not a training experiment.** `src/degradation.py` + `analyze_degradation.py`
 characterize the GT 256x256 -> NoisyLR 128x128 process across all 3,200 training
@@ -416,7 +420,65 @@ Ruled out with evidence: fixed-pattern noise (ratio 1.01), pre-downsampling blur
 (0.328%), gain/bias calibration (0.14%), spatial correlation (max 0.051),
 frequency-domain structure, and discrete degradation regimes.
 
-**Recommended next (Experiment 22), ranked:** (1) variance-stabilizing transform
-or `1/sqrt(var(I))`-weighted loss — **HIGH**; (2) signal-dependent synthetic-noise
+**Recommendations it produced, ranked:** (1) variance-stabilizing transform or
+`1/sqrt(var(I))`-weighted loss — **HIGH**; (2) signal-dependent synthetic-noise
 augmentation — **MEDIUM-HIGH**; (3) scene-group-aware training/validation —
-**MEDIUM**. **No Experiment 22 work has been started.**
+**MEDIUM**. Recommendation (2) became Experiment 24; recommendation (3) is now
+available as the standalone diagnostic `evaluate_group_aware.py`.
+
+### Experiment 23 (completed — current protected champion; EMA to epoch 90)
+
+`checkpoints/exp23_ema_extended90/checkpoint_best.pt` (epoch 90), ResidualSRNet
+64F/8B + EMA decay 0.999. Independently re-verified this session:
+**non-TTA 27.9893 dB / 0.756916 / 0.032443**, **+ x8 TTA 28.0355 dB / 0.758519 /
+0.032264**. This is the number Experiment 24 must beat.
+
+Secondary group-aware diagnostic (`evaluate_group_aware.py`): 28.2333 dB on a
+leakage-free split vs 27.9893 dB canonical. **Do not read that +0.24 dB as
+"leakage was costing us accuracy"** — it is a *different subset of images*, so
+per-image difficulty dominates the comparison. The group-aware metric is only
+meaningful compared against itself across experiments; canonical stays
+authoritative.
+
+### Experiment 24 (prepared, not yet run — signal-dependent synthetic noise)
+
+Adds synthetic noisy-LR training inputs drawn from the Experiment 22
+degradation model (`src/synthetic_noise.py`), as its MEDIUM-HIGH recommendation.
+`--synthetic-noise-prob 0.5` (default `0.0` = historical behavior); validation
+stays 100% real by construction — `build_datasets` never hands the augmentation
+to the validation dataset.
+
+Key decisions, all evidence-backed by `analyze_synthetic_noise.py`
+([report](results/synthetic_noise_analysis/synthetic_noise_report.json)):
+
+- **Gaussian epsilon, not Student-t.** The standardized residual looks
+  heavy-tailed (excess kurtosis +3.46 → t with ν≈5.7), but heteroscedastic
+  mixing *alone* already produces +2.45 excess kurtosis in the pooled residual.
+  Gaussian lands at +2.45 vs the real +3.52; Student-t overshoots to +8.54 and
+  is also worse on percentiles (0.0198 vs 0.0144). Much of the apparent tail
+  weight is error in `sigma(I)`, not real tail weight in epsilon.
+- **Match quality:** synthetic std 0.0850 vs real 0.0848; 37/40 intensity bins
+  within 10%; median ratio 1.004.
+- **Two documented limitations:** skewness is unmatched (real +0.407 vs ~0), and
+  the darkest bin under-noises 2.5x because the fitted quadratic's constant is
+  negative and clamps to zero below I=0.0092. `--synthetic-noise-variance-floor
+  1.43e-4` fixes the latter (worst bin 0.449 → ~1.21) but the default stays
+  `0.0` to reproduce the Experiment 22 model verbatim.
+- **Alignment:** substitution happens at full resolution *before* cropping, so
+  the existing aligned-crop transform is reused unchanged and GT/LR cannot
+  desynchronize.
+- **Reproducibility:** `numpy.random.default_rng(SeedSequence([seed, epoch,
+  index]))` — no global RNG, worker-count independent, fresh realization each
+  epoch via `train_dataset.set_epoch(epoch)`.
+
+**Next step: the real run** (not started; `checkpoints/exp24_noise_aug/` does not
+exist):
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 \
+  --synthetic-noise-prob 0.5 --synthetic-noise-distribution gaussian \
+  --epochs 90 --checkpoint-dir checkpoints/exp24_noise_aug
+```

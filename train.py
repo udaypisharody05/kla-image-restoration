@@ -20,6 +20,10 @@ An optional exponential moving average of the model weights (see
 best-checkpoint selection) uses the EMA shadow weights instead of the live
 training weights, while the live weights keep training normally underneath.
 Default is off, reproducing every prior experiment's behavior exactly.
+
+``--synthetic-noise-prob`` (default ``0.0``, off) mixes in extra *training*
+inputs synthesized from GT via the Experiment 22 signal-dependent degradation
+model (see ``src/synthetic_noise.py``). Validation always stays 100% real.
 """
 
 import argparse
@@ -39,6 +43,13 @@ from src.losses import build_loss, build_loss_config, loss_label
 from src.metrics import psnr, ssim
 from src.models import build_model, build_model_config
 from src.splits import split_pairs
+from src.synthetic_noise import (
+    DISTRIBUTIONS,
+    STUDENT_T_DEGREES_OF_FREEDOM,
+    SyntheticNoiseAugmentation,
+    build_synthetic_noise,
+    build_synthetic_noise_config,
+)
 from src.thermal import GpuTemperatureGuard
 from src.transforms import create_training_transform
 
@@ -69,6 +80,7 @@ def build_datasets(
     scale: int,
     max_train_samples: int | None,
     max_val_samples: int | None,
+    synthetic_noise: SyntheticNoiseAugmentation | None = None,
 ) -> tuple[PairedRestorationDataset, PairedRestorationDataset, int]:
     """Rebuild the canonical split and wrap it with the project's dataset classes."""
     layout = discover_layout(data_dir)
@@ -80,8 +92,12 @@ def build_datasets(
         validation_pairs = validation_pairs[:max_val_samples]
 
     training_transform = create_training_transform(crop_size=crop_size, scale=scale, augment=True)
-    train_dataset = PairedRestorationDataset(train_pairs, scale=scale, transform=training_transform)
-    # Validation stays deterministic and full-resolution, directly comparable to bicubic.
+    train_dataset = PairedRestorationDataset(
+        train_pairs, scale=scale, transform=training_transform, synthetic_noise=synthetic_noise
+    )
+    # Validation stays deterministic, full-resolution, and 100% REAL -- no
+    # synthetic_noise is ever passed here, so no reported metric, scheduler
+    # decision, or checkpoint selection can ever see a synthesized input.
     validation_dataset = PairedRestorationDataset(validation_pairs, scale=scale)
     return train_dataset, validation_dataset, len(pairs)
 
@@ -211,6 +227,7 @@ def save_checkpoint(
     loss_config: dict | None = None,
     ema: ExponentialMovingAverage | None = None,
     ema_config: dict | None = None,
+    synthetic_noise_config: dict | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -235,6 +252,10 @@ def save_checkpoint(
             "loss_config": loss_config if loss_config is not None else {"name": "l1"},
             "ema_state_dict": ema.state_dict() if ema is not None else None,
             "ema_config": ema_config,
+            # Fully reconstructs the augmentation (probability, distribution,
+            # variance coefficients, floor, downsampling, seed) -- see
+            # SyntheticNoiseAugmentation.config(). None means "not used".
+            "synthetic_noise_config": synthetic_noise_config,
         },
         path,
     )
@@ -254,6 +275,7 @@ def load_checkpoint_for_resume(
     scheduler_config: dict | None = None,
     ema: ExponentialMovingAverage | None = None,
     ema_config: dict | None = _UNSET,
+    synthetic_noise_config: dict | None = _UNSET,
 ) -> tuple[int, float, dict]:
     """Restore model/optimizer/(optional) scheduler/(optional) EMA state from *path*.
 
@@ -326,6 +348,19 @@ def load_checkpoint_for_resume(
                 f"Checkpoint ema_config {checkpoint_ema_config} does not match "
                 f"the requested ema_config {ema_config}; pass matching "
                 "--ema/--ema-decay to resume."
+            )
+    if synthetic_noise_config is not _UNSET:
+        # Same _UNSET-sentinel rationale as ema_config: None is the augmentation's
+        # own legitimate "disabled" value, so it cannot double as "skip the check".
+        # Changing the augmentation mid-run silently changes what the model is
+        # being trained on, so every difference is rejected.
+        checkpoint_synthetic_config = checkpoint.get("synthetic_noise_config")
+        if checkpoint_synthetic_config != synthetic_noise_config:
+            raise ValueError(
+                f"Checkpoint synthetic_noise_config {checkpoint_synthetic_config} does not "
+                f"match the requested synthetic_noise_config {synthetic_noise_config}; pass "
+                "matching --synthetic-noise-prob/--synthetic-noise-distribution/"
+                "--synthetic-noise-nu/--synthetic-noise-variance-floor to resume."
             )
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -556,6 +591,40 @@ def parse_args() -> argparse.Namespace:
         "--ema-decay", type=float, default=0.999, help="EMA decay rate (ignored unless --ema)"
     )
     parser.add_argument(
+        "--synthetic-noise-prob",
+        type=float,
+        default=0.0,
+        help=(
+            "Per-sample probability of replacing the real NoisyLR with one synthesized from "
+            "GT using the Experiment 22 signal-dependent degradation model. 0.0 (default) "
+            "disables the augmentation and reproduces historical behavior exactly. "
+            "Validation is always 100%% real regardless of this setting."
+        ),
+    )
+    parser.add_argument(
+        "--synthetic-noise-distribution",
+        type=str,
+        choices=list(DISTRIBUTIONS),
+        default="gaussian",
+        help="Noise shape (ignored unless --synthetic-noise-prob > 0)",
+    )
+    parser.add_argument(
+        "--synthetic-noise-nu",
+        type=float,
+        default=STUDENT_T_DEGREES_OF_FREEDOM,
+        help="Student-t degrees of freedom (ignored unless distribution is student_t)",
+    )
+    parser.add_argument(
+        "--synthetic-noise-variance-floor",
+        type=float,
+        default=0.0,
+        help=(
+            "Lower bound on modelled noise variance. 0.0 (default) is the Experiment 22 "
+            "model verbatim; a small positive floor compensates for it under-predicting "
+            "sigma in the darkest intensity bin."
+        ),
+    )
+    parser.add_argument(
         "--loss",
         type=str,
         choices=["l1", "mse", "charbonnier", "l1_ssim"],
@@ -629,6 +698,19 @@ def main() -> None:
     else:
         print("GPU temperature guard: disabled")
 
+    synthetic_noise_config = build_synthetic_noise_config(
+        args.synthetic_noise_prob,
+        seed=args.seed,
+        distribution=args.synthetic_noise_distribution,
+        degrees_of_freedom=args.synthetic_noise_nu,
+        variance_floor=args.synthetic_noise_variance_floor,
+    )
+    synthetic_noise = build_synthetic_noise(synthetic_noise_config)
+    if synthetic_noise is not None:
+        print(f"Synthetic noise augmentation: {synthetic_noise_config}")
+    else:
+        print("Synthetic noise augmentation: disabled")
+
     train_dataset, validation_dataset, total_pairs = build_datasets(
         args.data_dir,
         args.val_fraction,
@@ -637,6 +719,7 @@ def main() -> None:
         args.scale,
         args.max_train_samples,
         args.max_val_samples,
+        synthetic_noise=synthetic_noise,
     )
     print(
         f"Discovered {total_pairs} pairs -> "
@@ -735,6 +818,7 @@ def main() -> None:
             scheduler_config=scheduler_config,
             ema=ema,
             ema_config=ema_config,
+            synthetic_noise_config=synthetic_noise_config,
         )
         print(
             f"Resumed from {args.resume}: continuing at epoch {start_epoch} "
@@ -754,6 +838,10 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         started = time.time()
         epoch_lr = current_lr(optimizer)
+        # Advances the synthetic-noise stream so each epoch draws fresh
+        # realizations while staying a pure function of (seed, epoch, index).
+        # No-op when the augmentation is disabled.
+        train_dataset.set_epoch(epoch)
         train_loss = train_one_epoch(
             model, train_loader, optimizer, loss_fn, device, thermal_guard, ema=ema
         )
@@ -812,6 +900,7 @@ def main() -> None:
             loss_config=loss_config,
             ema=ema,
             ema_config=ema_config,
+            synthetic_noise_config=synthetic_noise_config,
         )
         if is_new_best:
             save_checkpoint(
@@ -827,6 +916,7 @@ def main() -> None:
                 loss_config=loss_config,
                 ema=ema,
                 ema_config=ema_config,
+                synthetic_noise_config=synthetic_noise_config,
             )
             print(f"New best checkpoint saved ({best_path}); Val PSNR={best_val_psnr:.4f} dB")
 

@@ -3603,43 +3603,88 @@ run has not been started.**
 
 ---
 
-# ⚠ Documentation gap: Experiments 19-21 training runs are undocumented
+# Canonical experiment numbering (resolved 2026-08-11)
 
-Recorded during Experiment 21's degradation analysis (2026-08-11) as a factual
-observation about repository state — **no experiment result below has been
-verified, re-evaluated, or altered here.**
+An earlier session flagged that "Experiment 21" had been used for two different
+things. The numbering below is now **authoritative**; the degradation analysis
+previously headed "Experiment 21" is renumbered to **22**, matching its
+checkpoint-free, analysis-only nature and the sequence the EMA runs occupy.
 
-The Experiment 19 section above still reads "PLANNED / PREPARED", but three EMA
-training runs have since been executed and their checkpoint directories exist:
+| # | what | artifact |
+| --- | --- | --- |
+| 19 | EMA weight averaging, 60 epochs | `checkpoints/exp19_ema/` |
+| 20 | EMA continuation to epoch 70 | `checkpoints/exp20_ema_extended70/` |
+| 21 | EMA continuation to epoch 80 | `checkpoints/exp21_ema_extended80/` |
+| 22 | Dataset degradation forensics (**analysis only**) | `results/degradation_analysis/` |
+| 23 | EMA continuation to epoch 90 — **current champion** | `checkpoints/exp23_ema_extended90/` |
+| 24 | Signal-dependent synthetic noise augmentation | prepared, not yet run |
 
-| checkpoint directory | stored epoch | stored `best_val_psnr` | `ema_config` |
-| --- | ---: | ---: | --- |
-| `checkpoints/exp19_ema/` | 60 | 27.828210 | decay 0.999 |
-| `checkpoints/exp20_ema_extended70/` | 70 | 27.884964 | decay 0.999 |
-| `checkpoints/exp21_ema_extended80/` | 80 | 27.938326 | decay 0.999 |
+Experiments 19, 20 and 21 still lack full write-ups. Their stored checkpoint
+metadata (read-only, not re-measured) is:
 
-These figures are read directly from each checkpoint's stored metadata, not
-re-measured. Two things need a human decision:
+| checkpoint directory | stored epoch | stored `best_val_psnr` |
+| --- | ---: | ---: |
+| `checkpoints/exp19_ema/` | 60 | 27.828210 |
+| `checkpoints/exp20_ema_extended70/` | 70 | 27.884964 |
+| `checkpoints/exp21_ema_extended80/` | 80 | 27.938326 |
 
-1. **Experiments 19, 20 and 21 (the EMA runs) have no write-up.** They should be
-   closed properly — including an independent `evaluate_checkpoint.py` pass — the
-   way every other experiment in this log was.
-2. **The identifier "Experiment 21" is used twice.** A training run already owns
-   `checkpoints/exp21_ema_extended80/`, and the degradation analysis below was
-   also named Experiment 21 by instruction. One of the two should be renumbered
-   before this log is relied on.
-
-Note also that `exp21_ema_extended80`'s stored 27.938326 dB (no TTA) already
-exceeds the 27.9293 dB currently cited for Experiment 20 + x8 TTA, so the
-"current champion" designation may itself be out of date. **Not acted on here.**
+EMA plainly helped — Experiment 16's non-TTA result was 27.7656 dB — and the
+progression continues monotonically into Experiment 23 below. Closing 19-21
+properly (with independent `evaluate_checkpoint.py` passes) remains outstanding.
 
 ---
 
-# Experiment 21 — Dataset Degradation Forensics
+# Experiment 23 — EMA Continuation to Epoch 90 (current champion)
 
 ## Status
 
-**COMPLETED — analysis only.** This is **not a training experiment**: no model
+**COMPLETED — current protected champion.** ResidualSRNet 64F/8B with EMA
+(decay 0.999), continued to epoch 90.
+
+## Verified result
+
+Independently re-measured on the canonical 640-image validation split with
+`evaluate_checkpoint.py` (which loads the EMA weights by default), against
+`checkpoints/exp23_ema_extended90/checkpoint_best.pt` (epoch 90):
+
+| pipeline | Val L1 | Val PSNR | Val SSIM |
+| --- | ---: | ---: | ---: |
+| non-TTA | 0.032443 | **27.9893 dB** | 0.756916 |
+| + x8 TTA | 0.032264 | **28.0355 dB** | **0.758519** |
+
+vs. bicubic: +4.8942 dB / +0.207915. Both figures reproduce the previously
+reported values exactly.
+
+**Experiment 23 + x8 TTA (28.0355 dB / 0.758519 / 0.032264) is the protected
+champion pipeline** that Experiment 24 must beat.
+
+### Secondary group-aware diagnostic
+
+Using the leakage-aware split from `evaluate_group_aware.py` (see Experiment 22
+for why: 38 of 640 canonical validation images have a near-identical scene in
+train):
+
+| split | n | L1 | PSNR | SSIM | leaked images |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| canonical | 640 | 0.032443 | 27.9893 | 0.756916 | 38 |
+| group-aware | 640 | 0.030269 | 28.2333 | 0.758245 | 0 |
+
+**Read this with care.** The group-aware split scores *higher*, not lower, which
+is the opposite of what "removing leakage" naively predicts. The reason is that
+it is a **different subset of images**, so the comparison is dominated by
+per-image difficulty variance rather than by leakage. The group-aware number is
+therefore only meaningful when compared against *itself* across experiments —
+never as an absolute correction to the canonical metric. Canonical remains the
+authoritative, historically comparable measurement.
+
+---
+
+# Experiment 22 — Dataset Degradation Forensics
+
+## Status
+
+**COMPLETED — analysis only** (originally numbered 21; see the numbering table
+above). This is **not a training experiment**: no model
 was trained, loaded, or evaluated, no checkpoint was created or modified, and no
 result in this log was changed. It characterizes the dataset's
 GT 256x256 -> NoisyLR 128x128 degradation so that Experiment 22's modeling
@@ -3729,7 +3774,187 @@ degradation-regime classification (no clusters), further resampling-kernel searc
 
 ## Result
 
-Analysis complete. **No model trained; no Experiment 22 work started.**
+Analysis complete. **No model trained.** Its top-ranked recommendation became
+Experiment 24 below; the group-aware split it motivated is now available as the
+standalone diagnostic `evaluate_group_aware.py`.
+
+---
+
+# Experiment 24 — Signal-Dependent Synthetic Noise Augmentation
+
+## Status
+
+**PLANNED / PREPARED.** Implementation, distribution selection, empirical
+match-quality gate, tests, CUDA sanity and a tiny real-data smoke test are all
+complete and passing. **No real training run has been started**
+(`checkpoints/exp24_noise_aug/` does not exist).
+
+## Hypothesis
+
+Training on additional independent noise realizations sampled from the
+Experiment 22 heteroscedastic degradation model may improve generalization
+beyond the finite set of 2,560 observed noisy inputs. Experiment 22 ranked this
+MEDIUM-HIGH: the corruption process is now characterized, the dataset is small,
+and synthesis needs no new labels.
+
+## Baseline to beat
+
+Experiment 23 + x8 TTA: **28.0355 dB / 0.758519 SSIM / 0.032264 L1**
+(non-TTA 27.9893 / 0.756916 / 0.032443).
+
+## The one experimental change
+
+Everything else is held at the champion recipe: ResidualSRNet 64F/8B, from
+scratch, seed 42, L1, crop96, batch16, Adam 1e-4, ReduceLROnPlateau
+(0.5/3/1e-6), EMA decay 0.999. No architecture, loss, optimizer, crop or EMA
+change — those are separate experiments.
+
+## Synthetic degradation model
+
+```
+clean_lr     = bicubic_downsample_2x(GT)          # the Exp 22 best GT->LR model
+variance(I)  = max(-6.19e-05 + 0.00653*I + 0.0201*I^2, variance_floor)
+synthetic_lr = clean_lr + sqrt(variance(clean_lr)) * epsilon
+```
+
+No clipping: real `NoisyLR` itself ranges roughly `[-0.003, 1.33]`, so clipping
+would make the synthetic stream *less* faithful.
+
+### Chosen epsilon: Gaussian (not Student-t)
+
+This is the counter-intuitive part, and it is decided by measurement rather than
+by the usual heuristic. The real *standardized* residual `r/sigma(I)` does look
+heavy-tailed (excess kurtosis +3.459, implying Student-t nu ≈ 5.7), which argues
+for t. But the augmentation's job is to reproduce the real **residual**, and
+heteroscedastic mixing across the intensity range already contributes excess
+kurtosis on its own:
+
+| quantity | real residual | Gaussian epsilon | Student-t epsilon |
+| --- | ---: | ---: | ---: |
+| std | 0.0848 | 0.0850 | 0.0850 |
+| skewness | +0.4072 | 0.0000 | +0.0103 |
+| excess kurtosis | +3.5185 | **+2.4536** | +8.5390 |
+| mean abs percentile error | — | **0.01436** | 0.01979 |
+
+Gaussian lands within 1.07 excess kurtosis of the real residual; Student-t
+overshoots by 5.02 and is worse on percentiles too. Much of the standardized
+residual's apparent tail weight is spread injected by imperfections in
+`sigma(I)`, not genuine tail weight in epsilon. **Gaussian is selected**, and
+`--synthetic-noise-distribution student_t` remains available for a future
+ablation. Selection was made by `analyze_synthetic_noise.py`; full numbers in
+[`results/synthetic_noise_analysis/synthetic_noise_report.json`](results/synthetic_noise_analysis/synthetic_noise_report.json).
+
+## Match quality (the Experiment 22 gate)
+
+Measured over 400 pairs, synthetic vs real residuals:
+
+- overall std **0.0850 vs 0.0848** (0.2% high)
+- **37 of 40** intensity bins within 10%; median ratio **1.004**
+- spatial autocorrelation stays near-white in both, as measured
+- **known limitation 1 — skewness:** real +0.407, synthetic ~0.000. Neither
+  candidate distribution is skewed; matching it would need an asymmetric noise
+  model, which was out of scope here.
+- **known limitation 2 — darkest bin:** worst ratio **0.449 at I=0.013**. The
+  fitted quadratic has a *negative* constant term, so variance is clamped to
+  zero below I=0.0092 and under-predicts sigma by ~2.5x in the darkest bin
+  (~2.8% of pixels). Setting `--synthetic-noise-variance-floor 1.43e-4`
+  (the measured dark-bin variance) improves the worst bin from 0.449 to ~1.21;
+  the default stays **0.0** so the Experiment 22 model is reproduced verbatim.
+
+**Verdict: the synthetic degradation reproduces the measured process well
+enough to proceed.** Both limitations are localized and documented rather than
+silently absorbed.
+
+## Mixture policy
+
+Per training sample, probability `--synthetic-noise-prob` (Experiment 24 uses
+**0.5**) of substituting a synthetic LR; otherwise the real `NoisyLR` is used.
+Real paired data is never removed. **Validation is 100% real** — `build_datasets`
+never passes the augmentation to the validation dataset, so no synthesized input
+can reach a reported metric, the scheduler, or checkpoint selection. Default is
+`0.0`, so every historical command behaves exactly as before.
+
+## Alignment and transform order
+
+```
+load real LR + GT
+  -> [maybe] replace LR with bicubic_downsample(GT) + noise   <-- full resolution
+  -> aligned paired random crop (existing PairedRandomCrop)
+  -> paired flips / 90-degree rotation (existing augmentation)
+```
+
+Substitution happens at **full resolution, before any cropping**, so the
+synthetic tensor is a drop-in with the identical spatial layout as the real LR.
+The existing aligned-crop transform then handles it unchanged — GT and LR
+cannot desynchronize because nothing crops them independently. A test confirms
+this end-to-end by re-downsampling the *returned* GT crop and checking it
+reproduces the returned LR crop to within the noise scale.
+
+## Reproducibility
+
+Noise is drawn from `numpy.random.default_rng(SeedSequence([seed, epoch, index]))`
+inside `SyntheticNoiseAugmentation` — an explicitly seeded generator, matching
+`src/splits.py`'s convention. No global/process RNG is touched, so the
+augmentation is a pure function of `(seed, epoch, index)`: identical across
+DataLoader worker counts, reproducible on re-run, yet drawing a **fresh
+realization each epoch** (`train.py` calls `train_dataset.set_epoch(epoch)`).
+
+## Checkpoint / resume
+
+`synthetic_noise_config` is stored in every checkpoint and fully reconstructs the
+augmentation: enabled, probability, seed, distribution, degrees of freedom,
+variance coefficients, variance floor, downsampling identifier, scale. Resume
+uses the same `_UNSET`-sentinel strict-match pattern as `ema_config`: matching
+config resumes; different probability, distribution, or variance floor is
+rejected; a synthetic checkpoint resumed with the augmentation disabled is
+rejected; and historical checkpoints (which lack the key entirely) resume
+unchanged.
+
+## Tests
+
+54 new tests in `tests/test_synthetic_noise_unit.py`. Full fast suite:
+**525 passed, 8 deselected** (up from 471).
+
+## CUDA sanity
+
+ResidualSRNet 64F/8B, batch16, crop96, L1, EMA 0.999, probability 0.5 on real
+data: batch shapes `(16,1,96,96)`/`(16,1,192,192)`, a genuine real/synthetic mix
+within the batch, finite inputs, finite loss and gradients, EMA updated, peak
+allocated 783.6 MiB / reserved 880.0 MiB, no OOM.
+
+## Real-data smoke test
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 --synthetic-noise-prob 0.5 \
+  --epochs 2 --max-train-samples 32 --max-val-samples 16 \
+  --checkpoint-dir checkpoints/exp24_noise_aug_smoke --num-workers 0
+```
+
+Verified then deleted: mixed real/synthetic training batches, real-only
+validation, EMA-driven validation, correct `synthetic_noise_config` in the
+checkpoint, `evaluate_checkpoint.py` working with `--tta none` and `--tta x8`,
+matching resume succeeding (scheduler *and* EMA state restored), and a
+mismatched `--synthetic-noise-prob 0.25` resume correctly rejected.
+
+## Result
+
+**TBD.** No real Experiment 24 training run has been started. Proposed command:
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 \
+  --synthetic-noise-prob 0.5 --synthetic-noise-distribution gaussian \
+  --epochs 90 --checkpoint-dir checkpoints/exp24_noise_aug
+```
+
+Then compare with `evaluate_checkpoint.py --checkpoint
+checkpoints/exp24_noise_aug/checkpoint_best.pt --tta x8` against the protected
+champion (28.0355 dB / 0.758519 / 0.032264).
 
 ---
 
@@ -3777,10 +4002,13 @@ above, which remains the only quantitative comparison in this log.
 | Exp 17 — Bicubic residual learning | ResidualSR learned branch + fixed bicubic global skip, trained from scratch | 27.7460 dB | 0.748557 | Complete |
 | Exp 17 + x8 TTA | Inference-only self-ensemble on Exp 17 checkpoint | 27.7942 dB | 0.750434 | Complete |
 | Exp 18 — Exp16+Exp17 ensemble | Weighted average of Exp 16 + Exp 17 raw predictions (best: 75/25 + x8) | 27.8149 dB | 0.750692 | Complete (rejected) |
-| Exp 19 — EMA weight averaging | ResidualSRNet 64F/8B, exponential moving average of weights (decay=0.999) | TBD | TBD | Run executed, **write-up missing** |
-| Exp 20 — EMA extended to 70 epochs | Continuation of Exp 19 | TBD | TBD | Run executed, **write-up missing** |
-| Exp 21 — EMA extended to 80 epochs | Continuation of Exp 20 | TBD | TBD | Run executed, **write-up missing**; identifier collides with the analysis below |
-| Exp 21 — Degradation forensics | **Analysis only**, no training: characterizes GT -> NoisyLR | n/a | n/a | Complete |
+| Exp 19 — EMA weight averaging | ResidualSRNet 64F/8B, exponential moving average of weights (decay=0.999) | 27.8282* | TBD | Run executed, **write-up missing** |
+| Exp 20 — EMA extended to 70 epochs | Continuation of Exp 19 | 27.8850* | TBD | Run executed, **write-up missing** |
+| Exp 21 — EMA extended to 80 epochs | Continuation of Exp 20 | 27.9383* | TBD | Run executed, **write-up missing** |
+| Exp 22 — Degradation forensics | **Analysis only**, no training: characterizes GT -> NoisyLR | n/a | n/a | Complete |
+| Exp 23 — EMA extended to 90 epochs | Continuation of Exp 21 | 27.9893 | 0.756916 | Complete |
+| **Exp 23 + x8 TTA** | Inference-only self-ensemble on Exp 23 checkpoint | **28.0355 dB** | **0.758519** | **Current champion** |
+| Exp 24 — Synthetic noise augmentation | 50% signal-dependent synthetic noisy-LR training inputs | TBD | TBD | Planned / prepared |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an
@@ -3796,6 +4024,9 @@ checkpoints combined at inference time via weighted raw-prediction averaging. It
 best tested configuration (0.875 Exp6 + 0.125 Exp9, with x8 TTA) still trails
 Experiment 6 + x8 TTA alone by -0.0128 dB PSNR / -0.000352 SSIM, so it was
 **rejected**; Experiment 6 + x8 TTA remains the best inference pipeline.
+
+*Exp 19/20/21 PSNR values are read from stored checkpoint metadata, not
+independently re-measured; those three runs still need proper write-ups.
 
 Note: Exp 12 (NAFNet-SR, 64F/8B, 432,129 params) was stopped deliberately at
 epoch 32 of a planned 40 after clearly plateauing (+0.0464 dB over epochs 25-32)
