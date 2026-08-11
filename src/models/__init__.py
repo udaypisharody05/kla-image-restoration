@@ -12,6 +12,7 @@ from torch import nn
 from .edsr_lite import EDSRLite, EDSRResidualBlock
 from .nafnet_sr import NAFBlock, NAFNetSR
 from .residual_sr import ResidualBlock, ResidualSRNet
+from .swinir_lite import SwinIRLite, SwinTransformerBlock
 
 __all__ = [
     "ResidualBlock",
@@ -20,6 +21,8 @@ __all__ = [
     "EDSRLite",
     "NAFBlock",
     "NAFNetSR",
+    "SwinTransformerBlock",
+    "SwinIRLite",
     "build_model_config",
     "build_model",
 ]
@@ -35,6 +38,11 @@ def build_model_config(
     residual_scale: float = 0.1,
     dw_expand: int = 2,
     ffn_expand: int = 2,
+    embed_dim: int = 48,
+    depth: int = 6,
+    num_heads: int = 6,
+    window_size: int = 8,
+    mlp_ratio: float = 2.0,
 ) -> dict:
     """Turn CLI/config values into a plain, checkpoint-serializable dict.
 
@@ -75,6 +83,18 @@ def build_model_config(
             "dw_expand": dw_expand,
             "ffn_expand": ffn_expand,
         }
+    if architecture == "swinir_lite":
+        return {
+            "architecture": "swinir_lite",
+            "in_channels": in_channels,
+            "out_channels": out_channels,
+            "embed_dim": embed_dim,
+            "depth": depth,
+            "num_heads": num_heads,
+            "window_size": window_size,
+            "mlp_ratio": mlp_ratio,
+            "scale": scale,
+        }
     raise ValueError(f"Unknown architecture: {architecture}")
 
 
@@ -114,5 +134,16 @@ def build_model(model_config: dict) -> nn.Module:
             scale=model_config["scale"],
             dw_expand=model_config["dw_expand"],
             ffn_expand=model_config["ffn_expand"],
+        )
+    if architecture == "swinir_lite":
+        return SwinIRLite(
+            in_channels=model_config["in_channels"],
+            out_channels=model_config["out_channels"],
+            embed_dim=model_config["embed_dim"],
+            depth=model_config["depth"],
+            num_heads=model_config["num_heads"],
+            window_size=model_config["window_size"],
+            mlp_ratio=model_config["mlp_ratio"],
+            scale=model_config["scale"],
         )
     raise ValueError(f"Unknown architecture: {architecture}")

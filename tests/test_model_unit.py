@@ -3,7 +3,14 @@
 import pytest
 import torch
 
-from src.models import EDSRLite, NAFNetSR, ResidualSRNet, build_model, build_model_config
+from src.models import (
+    EDSRLite,
+    NAFNetSR,
+    ResidualSRNet,
+    SwinIRLite,
+    build_model,
+    build_model_config,
+)
 
 
 @pytest.mark.parametrize(
@@ -221,3 +228,51 @@ def test_experiment_12_style_model_config_still_works_through_factory() -> None:
     model = build_model(exp12_config)
     assert isinstance(model, NAFNetSR)
     assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 432_129
+
+
+# --- Experiment 13: SwinIR-lite model factory support ---
+
+
+def test_swinir_lite_config_includes_architecture_and_transformer_fields() -> None:
+    config = build_model_config(
+        "swinir_lite", embed_dim=60, depth=6, num_heads=6, window_size=8, mlp_ratio=2.0, scale=2
+    )
+    assert config == {
+        "architecture": "swinir_lite",
+        "in_channels": 1,
+        "out_channels": 1,
+        "embed_dim": 60,
+        "depth": 6,
+        "num_heads": 6,
+        "window_size": 8,
+        "mlp_ratio": 2.0,
+        "scale": 2,
+    }
+
+
+def test_build_model_reconstructs_swinir_lite() -> None:
+    config = build_model_config(
+        "swinir_lite", embed_dim=8, depth=2, num_heads=2, window_size=4, mlp_ratio=2.0, scale=2
+    )
+    model = build_model(config)
+    assert isinstance(model, SwinIRLite)
+    output = model(torch.randn(1, 1, 16, 16))
+    assert output.shape == (1, 1, 32, 32)
+
+
+def test_experiment_13_style_model_config_still_works_through_factory() -> None:
+    """Experiment 13's exact intended model_config, reconstructed through build_model."""
+    exp13_config = {
+        "architecture": "swinir_lite",
+        "in_channels": 1,
+        "out_channels": 1,
+        "embed_dim": 60,
+        "depth": 6,
+        "num_heads": 6,
+        "window_size": 8,
+        "mlp_ratio": 2.0,
+        "scale": 2,
+    }
+    model = build_model(exp13_config)
+    assert isinstance(model, SwinIRLite)
+    assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 348_421

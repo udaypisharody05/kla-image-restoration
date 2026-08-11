@@ -1794,11 +1794,12 @@ tested with the same tools without new code.
 
 ## Status
 
-**PLANNED / PREPARED.** Implementation, tests, CUDA sanity, and a tiny real-data
-smoke test are complete and passing. **No real training run has been started.**
-The smoke-run metrics below are explicitly *not* an experiment result (1 epoch,
-32 train / 16 val samples, freshly initialized weights) and must not be compared
-against any other experiment's numbers.
+**COMPLETED -- STOPPED AT EPOCH 32.** The real Experiment 12 training run
+(`checkpoints/exp12_nafnet_sr/`, full canonical recipe below) was deliberately
+stopped at epoch 32 of a planned 40 after clear plateauing well below
+Experiment 6. The smoke-run metrics further below are infrastructure-verification
+artifacts only (1 epoch, 32 train / 16 val samples, freshly initialized weights)
+and are unrelated to this real result.
 
 ## Hypothesis
 
@@ -2013,11 +2014,372 @@ before and after this preparation task; every hash is unchanged. Specifically
 re-verified for `checkpoints/exp6_crop96/{checkpoint_best,checkpoint_latest}.pt`
 and `checkpoints/exp9_edsr_lite/{checkpoint_best,checkpoint_latest}.pt`.
 
+## Real Training Run
+
+Exact Experiment 12 configuration (`64 features / 8 NAF blocks / dw_expand=2 /
+ffn_expand=2`, 432,129 parameters), trained with the fully controlled recipe:
+L1 loss, crop96 LR / crop192 GT, batch16, seed42, Adam (initial LR 1e-4),
+ReduceLROnPlateau (factor 0.5, patience 3, min LR 1e-6), canonical split,
+full-image validation on all 640 validation samples, best checkpoint selected
+by validation PSNR -- identical to every other experiment's controlled
+variables; only the architecture differs.
+
+Checkpoint: `checkpoints/exp12_nafnet_sr/checkpoint_best.pt`. Independently
+re-verified via `evaluate_checkpoint.py --checkpoint
+checkpoints/exp12_nafnet_sr/checkpoint_best.pt --tta none`:
+
+```
+Loaded checkpoint checkpoints/exp12_nafnet_sr/checkpoint_best.pt (epoch=32, best_val_psnr=27.21782928578738)
+Training loss: L1 ({'name': 'l1'})
+Validation samples: 640
+Val L1 (diagnostic, always L1 regardless of training loss): 0.035279
+Val PSNR: 27.2178 dB
+Val SSIM: 0.729829
+Bicubic PSNR: 23.1413 dB
+Bicubic SSIM: 0.550604
+PSNR vs bicubic: +4.0765 dB
+SSIM vs bicubic: +0.179225
+```
+
+| Metric | Value |
+| --- | --- |
+| Best epoch | 32 (of 40 planned; stopped deliberately) |
+| Val L1 | 0.035279 |
+| Val PSNR | 27.2178 dB |
+| Val SSIM | 0.729829 |
+| PSNR vs bicubic | +4.0765 dB |
+| SSIM vs bicubic | +0.179225 |
+
+The checkpoint's stored `model_config` was confirmed identical to the intended
+Experiment 12 configuration (`architecture=nafnet_sr, num_features=64,
+num_blocks=8, dw_expand=2, ffn_expand=2, scale=2`), and its `training_config`
+confirms the controlled recipe (`crop_size=96, batch_size=16, seed=42, lr=1e-4`)
+was used unchanged.
+
+## Comparison vs Experiment 6
+
+| Metric | Exp 6 (champion) | Exp 12 (NAFNet-SR) | Delta |
+| --- | ---: | ---: | ---: |
+| Val L1 | 0.033420 | 0.035279 | +0.001859 |
+| Val PSNR | 27.7090 dB | 27.2178 dB | **-0.4912 dB** |
+| Val SSIM | 0.745634 | 0.729829 | **-0.015805** |
+| Parameters | 630,724 | 432,129 | 0.685x |
+
+Experiment 12 underperforms Experiment 6 on every metric, despite being a
+genuinely different (not merely smaller/larger residual-CNN) architecture.
+
+## Plateau Reasoning
+
+Validation PSNR after each ReduceLROnPlateau reduction shows diminishing,
+near-flat returns rather than continued climbing:
+
+| Epoch | Val PSNR |
+| --- | --- |
+| 25 | 27.1714 dB |
+| 28 | 27.2035 dB |
+| 30 | 27.2115 dB |
+| 32 | 27.2178 dB |
+
+Only **+0.0464 dB** improvement across epochs 25-32 (7 epochs), well within the
+kind of flat late-training tail seen in this project's other completed runs
+once the scheduler has reduced LR multiple times -- there is no indication that
+continuing to epoch 40 would close a ~0.49 dB gap to Experiment 6. Training was
+therefore stopped at epoch 32 rather than run to the full 40 epochs.
+
+## GPU Sizing Finding
+
+The originally scoped 96-feature / 12-block NAFNet-SR configuration
+(1,229,185 params, closer to Experiment 9's capacity) was found unsuitable for
+the available RTX 4060 Laptop GPU: at batch16/crop96 it required ~13 GB of
+training memory, exceeding the 8 GB VRAM budget and causing Windows
+shared-memory spill (per-batch runtime collapsed to ~18.9 seconds, versus
+~322 ms for the eventually-chosen configuration). This is a NAFNet-specific
+characteristic -- each `NAFBlock`'s ~10 sequential activation-heavy ops
+(vs. 2 conv ops per `ResidualSRNet`/`EDSRLite` block) cost substantially more
+activation memory per parameter than this project's other architectures. The
+safe 64-feature / 8-block configuration was used instead, and it trained
+without memory issues -- but it did not reach competitive validation
+performance, so the negative result above is not confounded by the earlier
+sizing problem.
+
+## Conclusion
+
+**NAFNet-SR is rejected.** The compact configuration required to fit this
+project's GPU budget underperforms Experiment 6 by a clear, non-noise margin
+(-0.4912 dB PSNR, -0.015805 SSIM) and plateaus well before its 40-epoch budget,
+so no benefit is expected from letting it run longer. Combined with Experiment
+9 (deeper/wider residual CNN, also negative) and Experiment 11 (ensembling
+Experiment 6 with a weaker model, also negative), three different attempts to
+beat Experiment 6 via architecture/scale/ensembling have now failed.
+**Experiment 6 remains the champion checkpoint, and Experiment 6 + x8 TTA
+(27.7689 dB / 0.747955) remains the best inference pipeline.** Both
+`checkpoints/exp12_nafnet_sr/checkpoint_best.pt` and `checkpoint_latest.pt` are
+retained for reproducibility, unmodified.
+
+---
+
+# Experiment 13 — SwinIR-lite Architecture
+
+## Status
+
+**PLANNED / PREPARED.** Implementation, tests, CUDA memory/runtime search,
+final CUDA sanity, and a tiny real-data smoke test are complete and passing.
+**No real training run has been started.** The smoke-run metrics below are
+infrastructure-verification artifacts only (1 epoch, 32 train / 16 val
+samples, freshly initialized weights) and must not be compared against any
+other experiment's numbers.
+
+## Hypothesis
+
+Three attempts to beat Experiment 6 via convolutional means have now failed:
+Experiment 9 (deeper/wider residual CNN), Experiment 11 (ensembling Experiment
+6 with a weaker model), and Experiment 12 (NAFNet-style gated convolutional
+blocks). All three stayed within the same broad family -- local convolutional
+receptive fields, however creatively combined. Experiment 13 tests a
+structurally different mechanism instead: **windowed self-attention**
+(Liu et al. 2021 Swin Transformer / Liang et al. 2021 SwinIR). The hypothesis
+is that attention within local windows, combined with the shifted-window
+mechanism that lets information cross window boundaries across layers, may
+preserve long-range structural consistency and fine semiconductor edges
+better than any convolution-only design tried so far.
+
+## Architecture
+
+Implemented locally in `src/models/swinir_lite.py` -- no third-party
+Swin/SwinIR package, no pretrained weights. Core components:
+
+- **`window_partition`/`window_reverse`**: split a `[B,H,W,C]` feature map
+  into non-overlapping `window_size x window_size` windows and back. Exact
+  inverses of each other (verified by a dedicated round-trip test).
+- **`WindowAttention`**: standard multi-head self-attention computed *within*
+  each window only (not globally across the full feature map), plus a
+  learned relative position bias indexed by each pair of in-window positions'
+  offset -- Swin's mechanism for giving attention spatial awareness without
+  absolute position embeddings.
+- **`SwinTransformerBlock`**: `LayerNorm` -> (optional cyclic shift) -> window
+  partition -> window multi-head self-attention -> window reverse -> (undo
+  shift) -> residual, followed by `LayerNorm` -> MLP (GELU) -> residual.
+  Blocks **alternate** between regular windows (`shift_size=0`) and shifted
+  windows (`shift_size=window_size//2`) so information can flow across window
+  boundaries; the shifted variant uses a precomputed additive attention mask
+  so a window that straddles the cyclic-shift wrap-around never attends
+  across the seam (the standard Swin masking construction, verified by a
+  shape test and a "mask changes the result" test).
+- **`SwinIRLite`**: adapts this (same-resolution) transformer body to 2x
+  super-resolution using the same shallow-conv / long-skip /
+  PixelShuffle-upsample skeleton already used by
+  `ResidualSRNet`/`EDSRLite`/`NAFNetSR` -- only the feature-processing body is
+  replaced by a stack of `SwinTransformerBlock`s operating on tokens instead
+  of a stack of convolutional blocks. No BatchNorm anywhere (`LayerNorm` only,
+  matching every other architecture in this project).
+
+### Input size handling
+
+`window_size` must evenly divide the transformer body's spatial dimensions.
+`window_size=8` was chosen because `96 % 8 == 0` (training crop) and
+`128 % 8 == 0` (full validation image), so both the common cases need no
+padding. For robustness beyond those two sizes, `SwinIRLite.forward` reflect-
+pads the post-shallow-conv feature map up to the next multiple of
+`window_size` before the transformer body and **crops the padding back off**
+before the long residual connection and upsampling -- so any input at least
+`window_size` in each dimension produces an exact `2x` output, and validation
+images are never silently cropped (only compute-internal padding is added and
+then discarded; verified by a non-multiple-of-window-size shape test).
+Inputs smaller than `window_size` raise a clear `ValueError` rather than
+padding into meaninglessness.
+
+## CUDA Memory/Runtime Candidate Search
+
+Following the sizing lesson from Experiment 12 (parameter count alone is not
+a safe sizing proxy), 4 small candidates were measured at the exact training
+configuration (`batch=16, input=[16,1,96,96]`, forward+backward+optimizer
+step) before choosing one -- no large sweep:
+
+| Candidate | Params | Peak Allocated | Peak Reserved | Headroom (of 8,187.5 MiB) | Per-batch |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| embed_dim=48, depth=6, heads=6 | 226,789 | 3,833.0 MiB | 4,642.0 MiB | 3,545.5 MiB (43%) | 326.7 ms |
+| embed_dim=64, depth=6, heads=8 | 397,617 | 5,079.3 MiB | 6,326.0 MiB | 1,861.5 MiB (23%) | 429.5 ms |
+| embed_dim=48, depth=4, heads=6 | 186,169 | 2,738.9 MiB | 3,574.0 MiB | 4,613.5 MiB (56%) | 227.5 ms |
+| **embed_dim=60, depth=6, heads=6 (chosen)** | **348,421** | 4,289.9 MiB | 5,350.0 MiB | **2,837.5 MiB (35%)** | 367.6 ms |
+
+All 4 candidates fit safely under 8 GB with no shared-memory spill (unlike
+Experiment 12's rejected 96f/12b candidate, every candidate here ran at
+normal millisecond-scale per-batch runtime, confirming none of them triggered
+memory pressure). None were rejected outright; embed_dim=60/depth=6/heads=6
+was chosen over the raw-headroom-maximizing embed_dim=48/depth=4 option
+because it is meaningfully more expressive (nearly double the parameters, two
+more transformer blocks) while still preferring several GB of headroom over
+the embed_dim=64/heads=8 option, which left only ~23% headroom -- closer to
+the "running at the absolute limit" this search was explicitly meant to
+avoid.
+
+## Chosen Configuration
+
+| Parameter | Value |
+| --- | --- |
+| Embedding dimension (`embed_dim`) | 60 |
+| Transformer blocks (`depth`) | 6 |
+| Attention heads (`num_heads`) | 6 (head dim = 10) |
+| Window size (`window_size`) | 8 |
+| MLP expansion ratio (`mlp_ratio`) | 2.0 |
+| Scale | 2 |
+| **Parameter count** | **348,421** |
+
+Ratio vs Experiment 6 (630,724 params): 0.552x. Ratio vs Experiment 12
+(432,129 params): 0.806x -- a comparable capacity class to the other compact
+architectures tried in this project, not an outlier in either direction.
+
+## Model Factory / CLI
+
+- `src/models/__init__.py`: `build_model_config`/`build_model` extended with
+  `architecture="swinir_lite"` plus `embed_dim`/`depth`/`num_heads`/
+  `window_size`/`mlp_ratio` parameters. `residual_sr`/`edsr_lite`/`nafnet_sr`
+  configs and reconstruction are byte-for-byte unchanged; default architecture
+  remains `residual_sr`.
+- `train.py --model` gains the `swinir_lite` choice, plus 5 new
+  architecture-specific flags (`--embed-dim`, `--depth`, `--num-heads`,
+  `--window-size`, `--mlp-ratio`) -- all ignored unless `--model swinir_lite`,
+  matching the existing `--residual-scale`/`--dw-expand`-style convention. No
+  other CLI, loss, crop, scheduler, optimizer, or seed behavior changed.
+- `evaluate_checkpoint.py`/`infer_test.py` require **no changes** -- both
+  already reconstruct models exclusively through `build_model`, confirmed by
+  tests and by the smoke-test evaluation below.
+- `src/tta.py` (x8 geometric self-ensemble) and `src/ensemble.py` (model
+  ensembling) are architecture-agnostic and were **not modified**; x8 TTA
+  confirmed working with `SwinIRLite` by test and by the smoke-test run below.
+
+### Exact `model_config`
+
+```python
+{
+    "architecture": "swinir_lite",
+    "in_channels": 1,
+    "out_channels": 1,
+    "embed_dim": 60,
+    "depth": 6,
+    "num_heads": 6,
+    "window_size": 8,
+    "mlp_ratio": 2.0,
+    "scale": 2,
+}
+```
+
+## Checkpoint / Resume Compatibility
+
+Verified by `tests/test_training_unit.py`:
+
+- Matching SwinIR-lite checkpoint + config -> resume succeeds (weights
+  restored exactly, epoch/best-PSNR continuation correct).
+- SwinIR-lite checkpoint + `residual_sr` config -> rejected.
+- SwinIR-lite checkpoint + `edsr_lite` config -> rejected.
+- SwinIR-lite checkpoint + `nafnet_sr` config -> rejected.
+- `residual_sr` checkpoint + SwinIR-lite config -> rejected.
+- `edsr_lite` checkpoint + SwinIR-lite config -> rejected.
+- `nafnet_sr` checkpoint + SwinIR-lite config -> rejected.
+- Legacy (no-`"architecture"`-key) checkpoints still reconstruct as
+  `ResidualSRNet`, unchanged.
+
+All six mismatch directions are rejected by the existing, unmodified
+dict-equality check in `load_checkpoint_for_resume` -- no new compatibility
+logic was needed, the same mechanism that already protected `edsr_lite` and
+`nafnet_sr`.
+
+## Tests
+
+38 new tests: `tests/test_swinir_lite_unit.py` (26 -- shapes/finiteness/
+gradients, exact Experiment 13 parameter count, window partition/reverse
+round-trip, window-attention shape/finiteness/mask-effect, shifted-window
+mask shape, block shape preservation for both regular and shifted variants,
+96x96 and 128x128 explicit shape checks, non-multiple-of-window-size padding
+behavior, too-small-input error, no-BatchNorm check, x8 TTA compatibility),
+plus factory tests in `tests/test_model_unit.py` (3) and checkpoint/resume/
+loading tests in `tests/test_training_unit.py` (9 -- config identifier
+storage, matching resume, all 6 cross-architecture mismatch directions,
+`evaluate_checkpoint`/`infer_test`'s shared `load_model` reconstructing
+`SwinIRLite`).
+
+`pytest -m "not integration" -q` -> **352 passed, 8 deselected** (up from
+314; every pre-existing test, including all TTA, ensemble, and NAFNet-SR
+tests, remains unchanged and passing).
+
+## CUDA Sanity Check
+
+Exact Experiment 13 configuration, `batch=16`, `input=[16,1,96,96]`,
+`loss=L1`, `optimizer=Adam`, forward -> loss -> backward -> optimizer step,
+10 timed iterations after 3 discarded warmup iterations:
+
+| Check | Result |
+| --- | --- |
+| Device | NVIDIA GeForce RTX 4060 Laptop GPU (CUDA) |
+| Parameter count | 348,421 |
+| Output shape | `(16, 1, 192, 192)` (matches expected exactly) |
+| Output finite | True |
+| Loss finite | True |
+| All gradients finite | True |
+| Peak allocated CUDA memory | 4,289.9 MiB |
+| Peak reserved CUDA memory | 5,350.0 MiB |
+| Total VRAM | 8,187.5 MiB |
+| Headroom | ~2,837.5 MiB (~35%) |
+| Per-batch runtime (avg of 10) | 367.6 ms |
+| OOM / shared-memory spill | None |
+
+## Real-Data Smoke Test (infrastructure verification only -- not a result)
+
+```bash
+python train.py --model swinir_lite --embed-dim 60 --depth 6 --num-heads 6 \
+  --window-size 8 --mlp-ratio 2.0 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --epochs 1 --max-train-samples 32 --max-val-samples 16 \
+  --checkpoint-dir checkpoints/exp13_swinir_lite_smoke --num-workers 0
+```
+
+Verified and then deleted (`checkpoints/exp13_swinir_lite_smoke/`, not
+committed):
+
+- CUDA used; printed `Model: swinir_lite (348,421 trainable parameters)` and
+  the exact `model_config` above.
+- Training and validation both completed in 1.6s -- validation ran on real
+  full 128x128 LR images (16 samples), confirming the padding-free
+  `window_size=8` path handles the real validation resolution correctly, not
+  just the unit-test synthetic case.
+- `evaluate_checkpoint.py --tta none` and `--tta x8` both loaded the smoke
+  checkpoint and ran to completion with finite metrics.
+- `infer_test.py`'s model-loading path (`evaluate_checkpoint.load_model`)
+  reconstructed `SwinIRLite` correctly; `run_inference(..., tta="none")` and
+  `run_inference(..., tta="x8")` both produced finite, correctly-shaped
+  (2x input) predictions on a synthetic full-resolution-style test tensor.
+- No historical checkpoint was read or written during this test.
+
+The smoke run's own numbers (Val PSNR ~9-10 dB, near-random since the network
+saw only 32 samples for 1 epoch) are **not an experiment result** and are
+recorded here only as evidence the pipeline works end-to-end; they must not
+be compared against Experiment 6/9/10/11/12.
+
+## Checkpoint Safety
+
+`checkpoints/exp6_crop96/checkpoint_best.pt`, `checkpoints/exp9_edsr_lite/checkpoint_best.pt`,
+and `checkpoints/exp12_nafnet_sr/{checkpoint_best,checkpoint_latest}.pt` were
+SHA-256-hashed before and after this preparation task; every hash is
+unchanged.
+
 ## Result
 
-**TBD.** No real Experiment 12 training run has been started. The next step is
-a screening run (see `claude_code_project_handoff.md` for the exact command),
-not yet executed.
+**TBD.** No real Experiment 13 training run has been started. The next step
+is a screening run:
+
+```bash
+python train.py --model swinir_lite --embed-dim 60 --depth 6 --num-heads 6 \
+  --window-size 8 --mlp-ratio 2.0 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --epochs 15 --checkpoint-dir checkpoints/exp13_swinir_lite
+```
+
+then compare with `evaluate_checkpoint.py --checkpoint checkpoints/exp13_swinir_lite/checkpoint_best.pt`
+against Experiment 6 (27.7090 dB / 0.745634) before deciding whether a full
+40-epoch run or x8 TTA evaluation is warranted. **This run has not been
+started.**
 
 ---
 
@@ -2056,7 +2418,8 @@ above, which remains the only quantitative comparison in this log.
 | Exp 9 — EDSR-lite arch   | ResidualSRNet -> EDSRLite (64F/16B, 1.37M params) | 27.5658 dB | 0.742162 | Complete |
 | Exp 10 — x8 geometric TTA | Inference-only self-ensemble on Exp 6 checkpoint | **27.7689 dB** | **0.747955** | Complete |
 | Exp 11 — Model ensemble  | Weighted average of Exp 6 + Exp 9 raw predictions | 27.7561 dB | 0.747603 | Complete (rejected) |
-| Exp 12 — NAFNet-SR arch  | ResidualSRNet -> NAFNet-style gated blocks (64F/8B, 432K params) | TBD | TBD | Planned / prepared |
+| Exp 12 — NAFNet-SR arch  | ResidualSRNet -> NAFNet-style gated blocks (64F/8B, 432K params) | 27.2178 dB | 0.729829 | Complete (rejected, stopped @32) |
+| Exp 13 — SwinIR-lite arch | Convolution -> windowed self-attention (embed60/6 blocks, 348K params) | TBD | TBD | Planned / prepared |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an
@@ -2068,6 +2431,12 @@ checkpoints combined at inference time via weighted raw-prediction averaging. It
 best tested configuration (0.875 Exp6 + 0.125 Exp9, with x8 TTA) still trails
 Experiment 6 + x8 TTA alone by -0.0128 dB PSNR / -0.000352 SSIM, so it was
 **rejected**; Experiment 6 + x8 TTA remains the best inference pipeline.
+
+Note: Exp 12 (NAFNet-SR, 64F/8B, 432,129 params) was stopped deliberately at
+epoch 32 of a planned 40 after clearly plateauing (+0.0464 dB over epochs 25-32)
+well below Experiment 6 (-0.4912 dB PSNR / -0.015805 SSIM). **Rejected**; see
+the full Experiment 12 entry above for the GPU-sizing finding that shaped its
+configuration and the plateau data behind the stop decision.
 
 Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
 (+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and

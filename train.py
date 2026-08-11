@@ -318,7 +318,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        choices=["residual_sr", "edsr_lite", "nafnet_sr"],
+        choices=["residual_sr", "edsr_lite", "nafnet_sr", "swinir_lite"],
         default="residual_sr",
         help="Architecture. 'residual_sr' (default) reproduces Experiments 1-8 exactly.",
     )
@@ -327,6 +327,36 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.1,
         help="EDSR-style fixed residual-block scale (ignored unless --model edsr_lite)",
+    )
+    parser.add_argument(
+        "--embed-dim",
+        type=int,
+        default=48,
+        help="SwinIR-lite token embedding width (ignored unless --model swinir_lite)",
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=6,
+        help="SwinIR-lite number of Swin Transformer blocks (ignored unless --model swinir_lite)",
+    )
+    parser.add_argument(
+        "--num-heads",
+        type=int,
+        default=6,
+        help="SwinIR-lite attention heads; must divide --embed-dim (ignored unless --model swinir_lite)",
+    )
+    parser.add_argument(
+        "--window-size",
+        type=int,
+        default=8,
+        help="SwinIR-lite attention window size (ignored unless --model swinir_lite)",
+    )
+    parser.add_argument(
+        "--mlp-ratio",
+        type=float,
+        default=2.0,
+        help="SwinIR-lite MLP hidden-dim expansion ratio (ignored unless --model swinir_lite)",
     )
     parser.add_argument("--device", type=str, default=None, help="cuda or cpu; default auto-detects")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
@@ -474,6 +504,11 @@ def main() -> None:
         num_blocks=args.num_blocks,
         scale=args.scale,
         residual_scale=args.residual_scale,
+        embed_dim=args.embed_dim,
+        depth=args.depth,
+        num_heads=args.num_heads,
+        window_size=args.window_size,
+        mlp_ratio=args.mlp_ratio,
     )
     model = build_model(model_config).to(device)
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -194,43 +194,43 @@ TTA remains the best inference pipeline.** `src/ensemble.py` and
 architecturally-different candidate (e.g. NAFNet/SwinIR/Restormer), should one be
 trained later.
 
-### Experiment 12 (prepared, not yet run — NAFNet-SR architecture)
+### Experiment 12 (completed — rejected; NAFNet-SR architecture, stopped @ epoch 32)
 
-A genuinely different feature-processing design, prepared but **not yet
-trained**: `src/models/nafnet_sr.py` implements NAFNet-style gated blocks
-locally (channel-wise `LayerNorm2d`, `SimpleGate` split-and-multiply as the only
-in-block nonlinearity — no ReLU/GELU, simplified channel attention, learnable
-zero-initialized per-branch residual scales) wrapped in the same shallow-conv /
-long-skip / PixelShuffle-upsample skeleton as `ResidualSRNet`/`EDSRLite`. Wired
-into the shared model factory as `architecture="nafnet_sr"` (`--model nafnet_sr`
-on `train.py`; `evaluate_checkpoint.py`/`infer_test.py` needed no changes since
-both already reconstruct exclusively through `build_model`); legacy and
-`edsr_lite` checkpoints are unaffected, and all 5 cross-architecture resume
-mismatches are rejected by the existing dict-equality check.
+A genuinely different feature-processing design: `src/models/nafnet_sr.py`
+implements NAFNet-style gated blocks locally (channel-wise `LayerNorm2d`,
+`SimpleGate` split-and-multiply as the only in-block nonlinearity — no
+ReLU/GELU, simplified channel attention, learnable zero-initialized per-branch
+residual scales) wrapped in the same shallow-conv / long-skip /
+PixelShuffle-upsample skeleton as `ResidualSRNet`/`EDSRLite`. Wired into the
+shared model factory as `architecture="nafnet_sr"`; legacy and `edsr_lite`
+checkpoints unaffected, all 5 cross-architecture resume mismatches rejected.
 
-**Sizing note:** an initial 96-feature/12-block candidate (1.23M params, in the
-suggested 1-3M range) was rejected by the CUDA sanity check — NAFNet-style blocks
-carry far more *activation* memory per parameter than this project's other
-architectures (~10 sequential ops per block vs. 2), and that candidate needed
-~13 GB at batch16/crop96, exceeding the 8 GB RTX 4060 Laptop GPU. Per the task's
-explicit instruction, batch/crop size were left untouched and the **architecture
-was resized down instead**: the chosen configuration is **64 features / 8 NAF
-blocks, 432,129 parameters** (0.685x Exp 6, 0.316x Exp 9), which fits safely
-(peak reserved ~6.47 GB of 8.19 GB, ~322 ms/batch — verified by a real CUDA
-forward+backward+optimizer-step sanity check and a tiny real-data smoke run,
-both passing; smoke checkpoint deleted, not committed, no historical checkpoint
-touched).
+**Sizing note:** an initial 96-feature/12-block candidate (1.23M params) was
+rejected by the CUDA sanity check — NAFNet-style blocks carry far more
+*activation* memory per parameter than this project's other architectures
+(~10 sequential ops per block vs. 2), and needed ~13 GB at batch16/crop96,
+exceeding the 8 GB RTX 4060 Laptop GPU. The architecture was resized down
+(batch/crop left untouched) to **64 features / 8 NAF blocks, 432,129
+parameters**, which fit safely (~6.47 GB peak reserved, ~322 ms/batch).
 
-**Next step: a real Experiment 12 screening run**, e.g.:
+**Real result:** trained with the full controlled recipe (L1, crop96, batch16,
+seed42, Adam, ReduceLROnPlateau) and **stopped deliberately at epoch 32 of 40**
+after clear plateauing (+0.0464 dB across epochs 25→32).
+`checkpoints/exp12_nafnet_sr/checkpoint_best.pt`, independently re-verified:
+**Val PSNR 27.2178 dB, Val SSIM 0.729829, Val L1 0.035279** — **-0.4912 dB PSNR
+/ -0.015805 SSIM** below Experiment 6. **NAFNet-SR is rejected.** This is the
+third architecture/scaling/ensembling attempt to beat Experiment 6 that has
+failed (after Experiment 9 and Experiment 11). **Experiment 6 remains the
+champion checkpoint; Experiment 6 + x8 TTA (27.7689 dB / 0.747955) remains the
+best inference pipeline.** Both Experiment 12 checkpoints are retained,
+unmodified, for reproducibility.
 
-```bash
-python train.py --model nafnet_sr --num-features 64 --num-blocks 8 \
-  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
-  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
-  --epochs 15 --checkpoint-dir checkpoints/exp12_nafnet_sr
-```
+### Experiment 13 (prepared, not yet run — SwinIR-lite architecture)
 
-then compare with `evaluate_checkpoint.py --checkpoint checkpoints/exp12_nafnet_sr/checkpoint_best.pt`
-against Experiment 6 (27.7090 dB / 0.745634) before deciding whether a full
-40-epoch run or x8 TTA evaluation is warranted. **This run has not been
-started.**
+Next architecture direction: **window-based self-attention** rather than
+another convolutional design, on the hypothesis that windowed self-attention
+may preserve long-range structural consistency and fine semiconductor edges
+better than the CNN-only architectures tried so far (Experiments 1-9, 12).
+See `EXPERIMENT_LOG.md`'s Experiment 13 entry for the exact chosen
+configuration, CUDA sizing candidates, and the not-yet-run screening command.
+**This run has not been started.**
