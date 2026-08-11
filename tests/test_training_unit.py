@@ -15,6 +15,7 @@ from torch import nn
 from evaluate_checkpoint import load_model
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import ImagePair
+from src.ema import ExponentialMovingAverage
 from src.losses import loss_label
 from src.models import (
     EDSRLite,
@@ -24,9 +25,11 @@ from src.models import (
     SwinIRLite,
     build_model_config,
 )
+from src.tta import predict_x8
 from src.transforms import create_training_transform
 from train import (
     build_datasets,
+    build_ema_config,
     load_checkpoint_for_resume,
     save_checkpoint,
     train_one_epoch,
@@ -1662,3 +1665,472 @@ def test_evaluate_checkpoint_load_model_reconstructs_residual_sr_bicubic(tmp_pat
     assert checkpoint["model_config"]["architecture"] == "residual_sr_bicubic"
     output = loaded_model(torch.randn(1, 1, 16, 16))
     assert output.shape == (1, 1, 32, 32)
+
+
+# --- Experiment 19: EMA weight averaging ---
+
+
+def _tiny_ema_model_config() -> dict:
+    return {"in_channels": 1, "out_channels": 1, "num_features": 4, "num_blocks": 1, "scale": 2}
+
+
+def test_train_one_epoch_updates_ema_after_optimizer_step(tmp_path: Path) -> None:
+    train_loader, _ = _tiny_loaders(tmp_path)
+    model = ResidualSRNet(**_tiny_ema_model_config())
+    ema = ExponentialMovingAverage(model, decay=0.9)
+    initial_shadow = {name: p.clone() for name, p in ema.shadow_model.named_parameters()}
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+
+    train_one_epoch(model, train_loader, optimizer, nn.L1Loss(), torch.device("cpu"), ema=ema)
+
+    # The shadow must have moved away from its initial value (updates occurred)
+    # but must NOT equal the live model exactly (decay=0.9 blends, doesn't copy).
+    assert any(
+        not torch.equal(initial_shadow[name], p)
+        for name, p in ema.shadow_model.named_parameters()
+    )
+    live_params = dict(model.named_parameters())
+    assert any(
+        not torch.equal(live_params[name], p) for name, p in ema.shadow_model.named_parameters()
+    )
+
+
+def test_ema_update_occurs_after_optimizer_step_not_before(tmp_path: Path) -> None:
+    """With decay=0.0-adjacent behavior impossible (decay must be in (0,1)), use
+    a very low decay so the shadow ends up extremely close to the *post-step*
+    live weights -- proving the update reads weights already moved by
+    optimizer.step(), not the pre-step weights."""
+    train_loader, _ = _tiny_loaders(tmp_path)
+    model = ResidualSRNet(**_tiny_ema_model_config())
+    pre_step_params = {name: p.clone() for name, p in model.named_parameters()}
+    ema = ExponentialMovingAverage(model, decay=0.01)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+
+    train_one_epoch(model, train_loader, optimizer, nn.L1Loss(), torch.device("cpu"), ema=ema)
+
+    live_params = dict(model.named_parameters())
+    for name, shadow_param in ema.shadow_model.named_parameters():
+        # Shadow (decay=0.01, so ~99% weight on the live value each step) must
+        # have moved close to the current (post-step) live weights, not stayed
+        # near the pre-step initial weights.
+        distance_to_live = (shadow_param - live_params[name]).abs().sum()
+        distance_to_pre_step = (shadow_param - pre_step_params[name]).abs().sum()
+        assert distance_to_live < distance_to_pre_step
+
+
+def test_validation_uses_ema_weights_not_live_weights(tmp_path: Path) -> None:
+    """Directly verifies the Experiment 19 semantics: after some training,
+    validate(ema.shadow_model, ...) must differ from validate(model, ...) --
+    proving the EMA path genuinely scores different weights, not accidentally
+    the live model under a different name."""
+    train_loader, validation_loader = _tiny_loaders(tmp_path)
+    model = ResidualSRNet(**_tiny_ema_model_config())
+    ema = ExponentialMovingAverage(model, decay=0.9)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+    train_one_epoch(model, train_loader, optimizer, nn.L1Loss(), torch.device("cpu"), ema=ema)
+
+    live_metrics = validate(model, validation_loader, nn.L1Loss(), torch.device("cpu"))
+    ema_metrics = validate(ema.shadow_model, validation_loader, nn.L1Loss(), torch.device("cpu"))
+    assert live_metrics["loss"] != ema_metrics["loss"]
+
+
+def test_scheduler_and_best_checkpoint_selection_receive_ema_psnr(tmp_path: Path) -> None:
+    """Simulates exactly what train.py's main() loop does: eval_model is the
+    EMA shadow, and val_metrics (what a scheduler.step()/best_val_psnr
+    comparison would consume) comes from validating *that* model -- not the
+    live one."""
+    train_loader, validation_loader = _tiny_loaders(tmp_path)
+    model = ResidualSRNet(**_tiny_ema_model_config())
+    ema = ExponentialMovingAverage(model, decay=0.9)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+    train_one_epoch(model, train_loader, optimizer, nn.L1Loss(), torch.device("cpu"), ema=ema)
+
+    eval_model = ema.shadow_model  # exactly train.py's `eval_model = ema.shadow_model if ema...`
+    val_metrics = validate(eval_model, validation_loader, nn.L1Loss(), torch.device("cpu"))
+    expected_ema_metrics = validate(
+        ema.shadow_model, validation_loader, nn.L1Loss(), torch.device("cpu")
+    )
+    assert val_metrics == expected_ema_metrics
+
+
+def test_ema_config_off_by_default() -> None:
+    assert build_ema_config(False, 0.999) is None
+
+
+def test_ema_config_records_decay_when_enabled() -> None:
+    assert build_ema_config(True, 0.999) == {"enabled": True, "decay": 0.999}
+
+
+def test_checkpoint_stores_ema_config_and_state(tmp_path: Path) -> None:
+    model = ResidualSRNet(**_tiny_ema_model_config())
+    ema = ExponentialMovingAverage(model, decay=0.999)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    ema_config = build_ema_config(True, 0.999)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=10.0,
+        model_config=_tiny_ema_model_config(),
+        training_config={},
+        ema=ema,
+        ema_config=ema_config,
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["ema_config"] == {"enabled": True, "decay": 0.999}
+    assert checkpoint["ema_state_dict"] is not None
+    assert checkpoint["ema_state_dict"].keys() == model.state_dict().keys()
+
+
+def test_checkpoint_omits_ema_state_when_disabled(tmp_path: Path) -> None:
+    model = ResidualSRNet(**_tiny_ema_model_config())
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=10.0,
+        model_config=_tiny_ema_model_config(),
+        training_config={},
+        ema=None,
+        ema_config=None,
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["ema_state_dict"] is None
+    assert checkpoint["ema_config"] is None
+
+
+def test_matching_ema_resume_restores_exact_state(tmp_path: Path) -> None:
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    ema = ExponentialMovingAverage(model, decay=0.9)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    ema_config = build_ema_config(True, 0.9)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(1.0)
+    ema.update(model)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=3,
+        best_val_psnr=15.0,
+        model_config=model_config,
+        training_config={},
+        ema=ema,
+        ema_config=ema_config,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_ema = ExponentialMovingAverage(resumed_model, decay=0.9)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-3)
+    start_epoch, best_val_psnr, _ = load_checkpoint_for_resume(
+        checkpoint_path,
+        resumed_model,
+        resumed_optimizer,
+        model_config,
+        torch.device("cpu"),
+        ema=resumed_ema,
+        ema_config=ema_config,
+    )
+    assert start_epoch == 4
+    assert best_val_psnr == 15.0
+    for (name, original), (_, restored) in zip(
+        ema.shadow_model.named_parameters(), resumed_ema.shadow_model.named_parameters()
+    ):
+        assert torch.equal(original, restored), name
+
+
+def test_resumed_ema_trajectory_matches_uninterrupted_trajectory(tmp_path: Path) -> None:
+    """Train EMA through 2 updates uninterrupted vs. 1 update, save/resume,
+    then 1 more update -- the final shadow weights must match exactly."""
+    model_config = _tiny_ema_model_config()
+    decay = 0.8
+
+    torch.manual_seed(0)
+    uninterrupted_model = ResidualSRNet(**model_config)
+    uninterrupted_ema = ExponentialMovingAverage(uninterrupted_model, decay=decay)
+    with torch.no_grad():
+        for parameter in uninterrupted_model.parameters():
+            parameter.add_(1.0)
+    uninterrupted_ema.update(uninterrupted_model)
+    with torch.no_grad():
+        for parameter in uninterrupted_model.parameters():
+            parameter.add_(1.0)
+    uninterrupted_ema.update(uninterrupted_model)
+
+    torch.manual_seed(0)
+    model = ResidualSRNet(**model_config)
+    ema = ExponentialMovingAverage(model, decay=decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    ema_config = build_ema_config(True, decay)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(1.0)
+    ema.update(model)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        epoch=1,
+        best_val_psnr=10.0,
+        model_config=model_config,
+        training_config={},
+        ema=ema,
+        ema_config=ema_config,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_ema = ExponentialMovingAverage(resumed_model, decay=decay)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-3)
+    load_checkpoint_for_resume(
+        checkpoint_path,
+        resumed_model,
+        resumed_optimizer,
+        model_config,
+        torch.device("cpu"),
+        ema=resumed_ema,
+        ema_config=ema_config,
+    )
+    with torch.no_grad():
+        for parameter in resumed_model.parameters():
+            parameter.add_(1.0)
+    resumed_ema.update(resumed_model)
+
+    for (name, expected), (_, actual) in zip(
+        uninterrupted_ema.shadow_model.named_parameters(),
+        resumed_ema.shadow_model.named_parameters(),
+    ):
+        assert torch.allclose(expected, actual, atol=1e-6), name
+
+
+def test_resume_rejects_different_ema_decay(tmp_path: Path) -> None:
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    ema = ExponentialMovingAverage(model, decay=0.999)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    ema_config_999 = build_ema_config(True, 0.999)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path, model, optimizer, epoch=1, best_val_psnr=10.0,
+        model_config=model_config, training_config={}, ema=ema, ema_config=ema_config_999,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    ema_config_99 = build_ema_config(True, 0.99)
+    resumed_ema = ExponentialMovingAverage(resumed_model, decay=0.99)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-3)
+    with pytest.raises(ValueError, match="ema_config"):
+        load_checkpoint_for_resume(
+            checkpoint_path, resumed_model, resumed_optimizer, model_config, torch.device("cpu"),
+            ema=resumed_ema, ema_config=ema_config_99,
+        )
+
+
+def test_resume_rejects_ema_disabled_against_ema_checkpoint(tmp_path: Path) -> None:
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    ema = ExponentialMovingAverage(model, decay=0.999)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    ema_config = build_ema_config(True, 0.999)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path, model, optimizer, epoch=1, best_val_psnr=10.0,
+        model_config=model_config, training_config={}, ema=ema, ema_config=ema_config,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-3)
+    with pytest.raises(ValueError, match="ema_config"):
+        load_checkpoint_for_resume(
+            checkpoint_path, resumed_model, resumed_optimizer, model_config, torch.device("cpu"),
+            ema=None, ema_config=build_ema_config(False, 0.999),
+        )
+
+
+def test_resume_rejects_ema_enabled_against_non_ema_checkpoint(tmp_path: Path) -> None:
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path, model, optimizer, epoch=1, best_val_psnr=10.0,
+        model_config=model_config, training_config={}, ema=None, ema_config=None,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_ema = ExponentialMovingAverage(resumed_model, decay=0.999)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-3)
+    with pytest.raises(ValueError, match="ema_config"):
+        load_checkpoint_for_resume(
+            checkpoint_path, resumed_model, resumed_optimizer, model_config, torch.device("cpu"),
+            ema=resumed_ema, ema_config=build_ema_config(True, 0.999),
+        )
+
+
+def test_ema_config_unset_by_default_skips_check_for_legacy_resume(tmp_path: Path) -> None:
+    """A caller that does not pass ema_config at all (the parameter's default,
+    distinct from explicitly passing None) must not be affected by the strict
+    check -- this is what keeps every pre-Experiment-19 test/resume path
+    working unmodified."""
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    ema = ExponentialMovingAverage(model, decay=0.999)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    ema_config = build_ema_config(True, 0.999)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path, model, optimizer, epoch=1, best_val_psnr=10.0,
+        model_config=model_config, training_config={}, ema=ema, ema_config=ema_config,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-3)
+    # No ema_config passed -- must not raise, even though the checkpoint has a
+    # (different, unrequested) EMA config stored.
+    start_epoch, best_val_psnr, _ = load_checkpoint_for_resume(
+        checkpoint_path, resumed_model, resumed_optimizer, model_config, torch.device("cpu"),
+    )
+    assert start_epoch == 2
+    assert best_val_psnr == 10.0
+
+
+def test_legacy_checkpoint_without_ema_still_resumes_when_ema_not_requested(tmp_path: Path) -> None:
+    """Simulates a real pre-Experiment-19 checkpoint (missing ema_state_dict/
+    ema_config keys entirely, like every historical Exp1-18 checkpoint)."""
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    legacy_checkpoint_path = tmp_path / "legacy_checkpoint.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": 40,
+            "best_val_psnr": 27.7090,
+            "model_config": model_config,
+            "training_config": {"seed": 42, "val_fraction": 0.2},
+            # Deliberately no ema_state_dict / ema_config keys.
+        },
+        legacy_checkpoint_path,
+    )
+
+    resumed_model = ResidualSRNet(**model_config)
+    resumed_optimizer = torch.optim.Adam(resumed_model.parameters(), lr=1e-3)
+    start_epoch, best_val_psnr, _ = load_checkpoint_for_resume(
+        legacy_checkpoint_path, resumed_model, resumed_optimizer, model_config,
+        torch.device("cpu"), ema_config=build_ema_config(False, 0.999),
+    )
+    assert start_epoch == 41
+    assert best_val_psnr == 27.7090
+
+
+def test_evaluate_checkpoint_load_model_prefers_ema_weights_when_present(tmp_path: Path) -> None:
+    """Covers both evaluate_checkpoint.py and infer_test.py, which reuses
+    load_model(): with EMA state present, the reconstructed model's weights
+    must match the EMA shadow, not the live/raw model_state_dict."""
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    ema = ExponentialMovingAverage(model, decay=0.5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(5.0)  # drive live and EMA weights far apart
+    ema.update(model)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path, model, optimizer, epoch=1, best_val_psnr=10.0,
+        model_config=model_config, training_config={},
+        ema=ema, ema_config=build_ema_config(True, 0.5),
+    )
+
+    loaded_model, checkpoint = load_model(checkpoint_path, torch.device("cpu"))
+    for (name, ema_param), (_, loaded_param) in zip(
+        ema.shadow_model.named_parameters(), loaded_model.named_parameters()
+    ):
+        assert torch.equal(ema_param, loaded_param), name
+    live_params = dict(model.named_parameters())
+    assert any(
+        not torch.equal(live_params[name], p) for name, p in loaded_model.named_parameters()
+    )
+
+
+def test_load_model_prefer_ema_false_loads_live_weights_instead(tmp_path: Path) -> None:
+    """Diagnostic path: prefer_ema=False must load the raw/live weights even
+    when EMA state is present, without changing which checkpoint was ranked
+    best (that ranking already happened during training)."""
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    ema = ExponentialMovingAverage(model, decay=0.5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(5.0)
+    ema.update(model)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path, model, optimizer, epoch=1, best_val_psnr=10.0,
+        model_config=model_config, training_config={},
+        ema=ema, ema_config=build_ema_config(True, 0.5),
+    )
+
+    loaded_model, _ = load_model(checkpoint_path, torch.device("cpu"), prefer_ema=False)
+    live_params = dict(model.named_parameters())
+    for name, loaded_param in loaded_model.named_parameters():
+        assert torch.equal(live_params[name], loaded_param), name
+
+
+def test_load_model_without_ema_state_falls_back_to_model_state_dict(tmp_path: Path) -> None:
+    """Every historical (non-EMA) checkpoint must load exactly as before --
+    prefer_ema defaulting to True must not change anything when there is no
+    EMA state to prefer."""
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path, model, optimizer, epoch=1, best_val_psnr=10.0,
+        model_config=model_config, training_config={},
+    )
+    loaded_model, _ = load_model(checkpoint_path, torch.device("cpu"))
+    for name, loaded_param in loaded_model.named_parameters():
+        assert torch.equal(dict(model.named_parameters())[name], loaded_param), name
+
+
+def test_x8_tta_works_with_ema_loaded_model(tmp_path: Path) -> None:
+    model_config = _tiny_ema_model_config()
+    model = ResidualSRNet(**model_config)
+    ema = ExponentialMovingAverage(model, decay=0.5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(1.0)
+    ema.update(model)
+
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path, model, optimizer, epoch=1, best_val_psnr=10.0,
+        model_config=model_config, training_config={},
+        ema=ema, ema_config=build_ema_config(True, 0.5),
+    )
+
+    loaded_model, _ = load_model(checkpoint_path, torch.device("cpu"))
+    result = predict_x8(loaded_model, torch.rand(1, 1, 16, 16))
+    assert result.shape == (1, 1, 32, 32)
+    assert torch.isfinite(result).all()

@@ -3353,6 +3353,256 @@ nothing regressed).
 
 ---
 
+# Experiment 19 — EMA Weight Averaging
+
+## Status
+
+**PLANNED / PREPARED.** Implementation, tests, CUDA sanity, and a tiny
+real-data smoke test are complete and passing. **No real training run has
+been started.** The smoke-run metrics below are infrastructure-verification
+artifacts only (2+1 epochs, 32 train / 16 val samples, freshly initialized
+weights, `decay=0.999` barely moved in so few steps) and must not be
+compared against any other experiment's numbers.
+
+## Hypothesis
+
+Does maintaining an exponential moving average (EMA) of the trained model's
+weights improve validation PSNR/generalization for the proven
+`ResidualSRNet`, by smoothing noisy late-stage parameter updates, while
+preserving the exact successful training formulation otherwise? The only
+experimental variable is EMA -- not combined with architecture, loss, crop
+schedule, optimizer, weight decay, cosine LR, warmup, AMP, or bicubic
+residual learning changes.
+
+## EMA Implementation
+
+Implemented as generic training infrastructure in `src/ema.py`, not
+architecture-specific -- `ResidualSRNet` itself is completely unmodified.
+
+- **`ExponentialMovingAverage(model, decay)`**: on construction, deep-copies
+  *model*'s **current** weights into a separate shadow model (`.eval()`,
+  every parameter `requires_grad_(False)`) -- **never zeros**. For a
+  from-scratch run this means the shadow starts out identical to the
+  network's freshly-initialized weights; for a resumed run, this initial
+  copy is immediately overwritten by the checkpoint's actual saved EMA state
+  via `load_state_dict` (see Resume below), so it is never the operative
+  state in that case.
+- **`update(model)`**: for every floating-point parameter,
+  `ema_param = decay * ema_param + (1 - decay) * live_param`. Buffers (e.g.
+  BatchNorm running stats -- none of this project's architectures have any)
+  are copied directly rather than averaged, since a buffer is not a
+  gradient-updated parameter and "smoothing" it has no well-defined meaning
+  independent of the live model's own bookkeeping; handled generically in
+  case a future architecture has any. Decorated `@torch.no_grad()`.
+  Verified numerically: initial=1, live=3, decay=0.9 -> shadow becomes
+  exactly `0.9*1 + 0.1*3 = 1.2`.
+- **Timing**: called once per optimizer step, i.e. once per training batch,
+  immediately after `optimizer.step()` inside `train_one_epoch`. The first
+  update therefore happens after the very first batch of training (or,
+  on a resumed run, after the first batch following the resumed epoch --
+  the shadow's prior trajectory was already restored before that point).
+- **Device/no-gradients**: `.to(device)` moves the shadow; every shadow
+  parameter has `requires_grad=False` and is never passed to any optimizer
+  (`torch.optim.Adam(model.parameters(), ...)` only ever sees the live
+  model's parameters) -- verified by a dedicated test checking the shadow's
+  parameter ids never appear in `optimizer.param_groups`.
+
+## Validation / Scheduler / Best-Checkpoint Semantics
+
+Implemented as a **one-line change in the training loop**, not new
+validation logic: `validate()` itself is completely unmodified; the caller
+simply passes a different model.
+
+```python
+eval_model = ema.shadow_model if ema is not None else model
+val_metrics = validate(eval_model, validation_loader, loss_fn, device, thermal_guard)
+```
+
+Since `scheduler_step(scheduler, scheduler_config, val_metrics["psnr"])` and
+the `is_new_best = val_metrics["psnr"] > best_val_psnr` check both only ever
+consume `val_metrics` (never touching `model`/`eval_model` directly), routing
+`val_metrics` through the EMA shadow automatically makes the scheduler and
+best-checkpoint selection EMA-driven too, with zero additional special-casing
+required elsewhere. Verified explicitly by a test asserting
+`validate(model, ...) != validate(ema.shadow_model, ...)` after training
+(proving genuinely different weights are scored, not the live model under a
+different name) and a second test confirming the exact `eval_model`
+expression used matches what gets validated.
+
+Training loss (inside `train_one_epoch`) always uses the **live** model --
+unaffected by any of this.
+
+## Checkpoint Representation
+
+`model_state_dict` **always** means the live/raw training weights, in every
+checkpoint, EMA or not -- this key's meaning never changes, so no historical
+loader needs to change. A new, separate `ema_state_dict` key (`None` when
+EMA is disabled) holds the EMA shadow's weights -- the ones that actually
+produced the checkpoint's recorded validation PSNR. `evaluate_checkpoint.py`'s
+`load_model()` gained a `prefer_ema: bool = True` parameter: when the
+checkpoint has non-`None` `ema_state_dict` and `prefer_ema` is true (the
+default), those EMA weights are loaded instead of `model_state_dict` --
+automatically, with no CLI flag needed on `evaluate_checkpoint.py`/
+`infer_test.py` (both call `load_model()` with its default `prefer_ema=True`
+already). Historical/non-EMA checkpoints have no `ema_state_dict`
+(`None`), so `load_model()` falls through to the exact prior behavior
+unchanged. `load_model(path, device, prefer_ema=False)` forces the live/raw
+weights instead, for diagnostics -- this never changes which checkpoint was
+selected "best" (that ranking already happened during training via the EMA
+`val_metrics` above), only which weights get loaded from it afterward.
+
+### Exact checkpoint additions
+
+```python
+{
+    ...  # every existing key, unchanged
+    "ema_state_dict": ema.state_dict() if ema is not None else None,
+    "ema_config": ema_config,  # {"enabled": True, "decay": 0.999} or None
+}
+```
+
+## CLI
+
+- `--ema` (`store_true`, default off) and `--ema-decay` (default `0.999`,
+  ignored unless `--ema`). Every historical command that never mentions
+  `--ema` behaves identically to before this feature existed.
+- Experiment 19 requests exactly `--ema --ema-decay 0.999`.
+
+## Resume Compatibility
+
+`load_checkpoint_for_resume` gained `ema`/`ema_config` parameters. Unlike
+`loss_config`/`scheduler_config` (which default to `None` meaning "skip this
+check"), `ema_config` defaults to a private `_UNSET` sentinel -- because
+`None` is EMA's own legitimate "disabled" value
+(`build_ema_config(False, ...)` returns `None`), reusing `None` as the
+"skip" signal could not distinguish "caller doesn't care" from "caller
+explicitly disabled EMA and wants that enforced". `train.py`'s real resume
+path always passes the actual computed `ema_config` (never omits it), so in
+real usage the check is always active and strict:
+
+- Matching EMA checkpoint + EMA enabled + same decay -> resumes correctly
+  (full EMA trajectory restored via `ema.load_state_dict`, verified exact).
+- EMA checkpoint + EMA disabled -> **rejected**.
+- EMA checkpoint + different decay -> **rejected**.
+- Non-EMA checkpoint + EMA resume request -> **rejected**.
+- Historical non-EMA checkpoints, resumed with `--ema` off (the default) ->
+  behave exactly as before (`None == None`, check passes trivially).
+- A resumed EMA run reaches the identical shadow weights as an uninterrupted
+  run through the same number of updates (verified via a deterministic
+  parameter-perturbation test, not real training, since exact floating-point
+  equality is what's being checked).
+
+## Tests
+
+31 new tests: `tests/test_ema_unit.py` (12 -- initialization-from-live-weights
+not zeros, independent-copy verification, decay-range validation, the exact
+numerical formula check from the task spec, multi-step compounding, a real
+multi-parameter-model check, no-gradients, not-in-optimizer, live-model
+untouched, device movement, state_dict round-trip), plus 19 in
+`tests/test_training_unit.py` (EMA updates occurring post-optimizer-step,
+validation/scheduler/best-checkpoint EMA semantics, config/state checkpoint
+storage, matching resume, resumed-vs-uninterrupted trajectory equivalence,
+all 3 mismatch-rejection directions, the `_UNSET`-skips-check legacy path, a
+simulated real pre-Experiment-19 checkpoint, `load_model` EMA-preference
+behavior in both directions, x8 TTA compatibility).
+
+`pytest -m "not integration" -q` -> **425 passed, 8 deselected** (up from
+394; every pre-existing test, including all model/scheduler/TTA/ensemble
+tests, remains unchanged and passing).
+
+## CUDA Sanity Check
+
+Short check only (not a sustained benchmark): `ResidualSRNet` 64F/8B,
+`batch=16`, `crop=96`, `L1`, EMA enabled (`decay=0.999`), forward -> backward
+-> `optimizer.step()` -> `ema.update()` -> EMA validation forward, 1 timed
+iteration after 3 discarded warmup iterations:
+
+| Check | Result |
+| --- | --- |
+| Device | NVIDIA GeForce RTX 4060 Laptop GPU (CUDA) |
+| Parameter count | 630,724 |
+| Forward output finite | True |
+| Loss finite | True |
+| All gradients finite | True |
+| EMA validation forward finite | True |
+| EMA shadow device | `cuda:0` (matches live model) |
+| Peak allocated CUDA memory | 783.3 MiB |
+| Peak reserved CUDA memory | 878.0 MiB |
+| OOM | None |
+
+Memory is essentially identical to Experiment 6/16 (same architecture); the
+EMA shadow adds a second copy of the ~630K-parameter model (a few MiB),
+negligible next to activation memory.
+
+## Real-Data Smoke Test (infrastructure verification only -- not a result)
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 \
+  --epochs 2 --max-train-samples 32 --max-val-samples 16 \
+  --checkpoint-dir checkpoints/exp19_ema_smoke --num-workers 0
+```
+
+Verified and then deleted (`checkpoints/exp19_ema_smoke/`, not committed):
+
+- CUDA used; printed `EMA: {'enabled': True, 'decay': 0.999}`.
+- Trained 2 epochs; checkpoint's `ema_config` = `{"enabled": True, "decay":
+  0.999}`, `ema_state_dict` present and **numerically different** from
+  `model_state_dict` (confirmed by direct tensor comparison) -- proving the
+  live and EMA weights are genuinely tracked separately, not aliased.
+- `evaluate_checkpoint.py --tta none` and `--tta x8` both loaded the smoke
+  checkpoint (EMA weights, by default) and ran to completion with finite
+  metrics.
+- `infer_test.py`'s model-loading path (`evaluate_checkpoint.load_model`)
+  confirmed to load weights matching `ema_state_dict` (not `model_state_dict`)
+  by direct tensor comparison; `run_inference` with both `tta="none"` and
+  `tta="x8"` produced finite, correctly-shaped output.
+- Resume verified: re-ran with `--resume .../checkpoint_latest.pt --epochs 3`;
+  printed both `"Restored scheduler state from checkpoint."` and
+  `"Restored EMA state from checkpoint."`, training continued correctly.
+- No historical checkpoint was read or written during this test.
+
+The smoke run's own numbers are **not an experiment result** (`decay=0.999`
+moves the shadow only ~0.1% per step, so 4 total optimizer steps across 2
+epochs leaves the EMA shadow still very close to its random initialization
+-- expected, not a bug) and must not be compared against Experiment
+6/9/.../16/17/18.
+
+## Checkpoint Safety
+
+`checkpoints/exp6_crop96/checkpoint_best.pt`,
+`checkpoints/exp9_edsr_lite/checkpoint_best.pt`,
+`checkpoints/exp12_nafnet_sr/checkpoint_best.pt`,
+`checkpoints/exp13_swinir_lite/checkpoint_best.pt`,
+`checkpoints/exp14_cosine/checkpoint_best.pt`,
+`checkpoints/exp15_extended60/checkpoint_best.pt`, and
+`checkpoints/exp16_extended70/{checkpoint_best,checkpoint_latest}.pt` and
+`checkpoints/exp17_bicubic_residual/{checkpoint_best,checkpoint_latest}.pt`
+were SHA-256-hashed before and after this preparation task; every hash is
+unchanged.
+
+## Result
+
+**TBD.** No real Experiment 19 training run has been started. The next step
+is the real 60-epoch run:
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 \
+  --epochs 60 --checkpoint-dir checkpoints/exp19_ema
+```
+
+then compare with `evaluate_checkpoint.py --checkpoint
+checkpoints/exp19_ema/checkpoint_best.pt` against the current champion
+pipeline, Experiment 16 + x8 TTA (27.8154 dB / 0.750571 / 0.032998). **This
+run has not been started.**
+
+---
+
 # Official Test-Set Inference Sanity Check (infrastructure, not a new experiment)
 
 After independently verifying Experiment 6, a small inference sanity check was run
@@ -3397,6 +3647,7 @@ above, which remains the only quantitative comparison in this log.
 | Exp 17 — Bicubic residual learning | ResidualSR learned branch + fixed bicubic global skip, trained from scratch | 27.7460 dB | 0.748557 | Complete |
 | Exp 17 + x8 TTA | Inference-only self-ensemble on Exp 17 checkpoint | 27.7942 dB | 0.750434 | Complete |
 | Exp 18 — Exp16+Exp17 ensemble | Weighted average of Exp 16 + Exp 17 raw predictions (best: 75/25 + x8) | 27.8149 dB | 0.750692 | Complete (rejected) |
+| Exp 19 — EMA weight averaging | ResidualSRNet 64F/8B, exponential moving average of weights (decay=0.999) | TBD | TBD | Planned / prepared |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an

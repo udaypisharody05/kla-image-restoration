@@ -64,14 +64,35 @@ def validate_x8(
     }
 
 
-def load_model(checkpoint_path: Path, device: torch.device) -> tuple[nn.Module, dict]:
+def load_model(
+    checkpoint_path: Path, device: torch.device, prefer_ema: bool = True
+) -> tuple[nn.Module, dict]:
+    """Reconstruct the model described by a checkpoint's ``model_config``.
+
+    ``build_model()`` reads ``model_config["architecture"]`` (missing ->
+    ResidualSRNet, the only interpretation every Experiment 1-8 checkpoint
+    ever used), so this one call reconstructs every architecture -- infer_test.py
+    reuses this same function and needs no changes either.
+
+    When the checkpoint has EMA state (``ema_state_dict``, saved by an
+    Experiment 19-style ``--ema`` run) and *prefer_ema* is true (the default),
+    those EMA weights are loaded instead of the live/raw ``model_state_dict``
+    -- the EMA weights are what validation actually scored to produce the
+    checkpoint's recorded PSNR, so this is what "the checkpoint" should mean
+    for evaluation/inference by default. Historical and non-EMA checkpoints
+    have no ``ema_state_dict`` (``None``), so they fall through to the exact
+    prior behavior unchanged. Pass ``prefer_ema=False`` to force loading the
+    live/raw weights instead, e.g. for diagnostics -- this never changes
+    which checkpoint was selected as "best" during training, only which
+    weights get loaded from it afterward.
+    """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    # build_model() reads model_config["architecture"] (missing -> ResidualSRNet,
-    # the only interpretation every Experiment 1-8 checkpoint ever used), so
-    # this one call reconstructs both historical and EDSRLite checkpoints --
-    # infer_test.py reuses this same function and needs no changes either.
     model = build_model(checkpoint["model_config"]).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    ema_state_dict = checkpoint.get("ema_state_dict")
+    if prefer_ema and ema_state_dict is not None:
+        model.load_state_dict(ema_state_dict)
+    else:
+        model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model, checkpoint
 

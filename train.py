@@ -13,6 +13,13 @@ or ``cosine`` (``CosineAnnealingLR`` over a fixed, explicitly-configured
 so a smoke test run with a small ``--epochs`` does not distort the intended
 schedule). The default ``--scheduler none`` reproduces Experiment 1's
 fixed-LR behavior exactly.
+
+An optional exponential moving average of the model weights (see
+``src/ema.py``) can be enabled with ``--ema`` (``--ema-decay``, default
+``0.999``). When enabled, validation (and therefore scheduler decisions and
+best-checkpoint selection) uses the EMA shadow weights instead of the live
+training weights, while the live weights keep training normally underneath.
+Default is off, reproducing every prior experiment's behavior exactly.
 """
 
 import argparse
@@ -27,6 +34,7 @@ from torch import nn
 from inspect_dataset import configured_data_dir
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import discover_layout, discover_pairs
+from src.ema import ExponentialMovingAverage
 from src.losses import build_loss, build_loss_config, loss_label
 from src.metrics import psnr, ssim
 from src.models import build_model, build_model_config
@@ -146,6 +154,19 @@ def scheduler_step(scheduler: Scheduler, scheduler_config: dict, val_psnr: float
         scheduler.step()
 
 
+def build_ema_config(enabled: bool, decay: float) -> dict | None:
+    """Turn CLI EMA options into a plain, checkpoint-serializable dict.
+
+    ``enabled=False`` (the default) returns ``None`` -- mirroring
+    ``build_scheduler_config``'s "off" convention -- so every historical
+    command that never mentions ``--ema`` produces an identical ``None``
+    both here and in the checkpoints it saves.
+    """
+    if not enabled:
+        return None
+    return {"enabled": True, "decay": decay}
+
+
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return optimizer.param_groups[0]["lr"]
 
@@ -188,10 +209,18 @@ def save_checkpoint(
     scheduler: Scheduler | None = None,
     scheduler_config: dict | None = None,
     loss_config: dict | None = None,
+    ema: ExponentialMovingAverage | None = None,
+    ema_config: dict | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
+            # Always the live/raw training weights, regardless of EMA -- this
+            # key's meaning never changes, so every historical loader (and
+            # resume) keeps working unmodified. The EMA shadow (when enabled)
+            # is stored separately below; it is what "checkpoint_best.pt"
+            # actually evaluated to reach its recorded PSNR (see
+            # evaluate_checkpoint.load_model's prefer_ema handling).
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": epoch,
@@ -204,9 +233,14 @@ def save_checkpoint(
             # one explicitly gets the same default all historical checkpoints
             # implicitly used.
             "loss_config": loss_config if loss_config is not None else {"name": "l1"},
+            "ema_state_dict": ema.state_dict() if ema is not None else None,
+            "ema_config": ema_config,
         },
         path,
     )
+
+
+_UNSET = object()  # distinguishes "caller didn't pass ema_config" from "caller passed None"
 
 
 def load_checkpoint_for_resume(
@@ -218,13 +252,15 @@ def load_checkpoint_for_resume(
     scheduler: Scheduler | None = None,
     loss_config: dict | None = None,
     scheduler_config: dict | None = None,
+    ema: ExponentialMovingAverage | None = None,
+    ema_config: dict | None = _UNSET,
 ) -> tuple[int, float, dict]:
-    """Restore model/optimizer/(optional) scheduler state from *path*.
+    """Restore model/optimizer/(optional) scheduler/(optional) EMA state from *path*.
 
     Returns (next_epoch, best_val_psnr, training_config) from the checkpoint.
-    Older checkpoints saved before scheduler support existed simply lack the
-    ``scheduler_state_dict``/``scheduler_config`` keys; ``.get()`` treats that
-    the same as an explicit ``None`` rather than raising.
+    Older checkpoints saved before scheduler/EMA support existed simply lack
+    the corresponding ``*_state_dict``/``*_config`` keys; ``.get()`` treats
+    that the same as an explicit ``None`` rather than raising.
 
     *loss_config*, when given, must match the checkpoint's stored loss config
     exactly (mirroring the strict ``model_config`` check below) -- a resume
@@ -238,6 +274,18 @@ def load_checkpoint_for_resume(
     run is being trained against. Pass ``None`` to skip this check (used by
     tests that don't care, and by callers resuming with ``--scheduler none``
     where there is nothing to compare).
+
+    *ema_config*, unlike the two checks above, defaults to the private
+    ``_UNSET`` sentinel rather than ``None`` -- because ``None`` is EMA's own
+    legitimate "disabled" value (``build_ema_config(False, ...)`` returns
+    ``None``), a plain ``None`` default could not distinguish "caller doesn't
+    want this checked" from "caller explicitly disabled EMA and wants that
+    enforced". ``train.py``'s real resume path always passes the actual
+    computed ``ema_config`` (never omits it), so in real usage this check is
+    always active and strict: an EMA checkpoint resumed with ``--ema`` off,
+    resumed with a different ``--ema-decay``, or a non-EMA checkpoint resumed
+    with ``--ema`` on, are all rejected. Only callers that omit the parameter
+    entirely (tests that don't care) skip the check.
     """
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     if checkpoint["model_config"] != model_config:
@@ -268,6 +316,17 @@ def load_checkpoint_for_resume(
                 f"the requested scheduler_config {scheduler_config}; pass matching "
                 "--scheduler/--scheduler-factor/--scheduler-patience/--scheduler-t-max/--min-lr to resume."
             )
+    if ema_config is not _UNSET:
+        # Checkpoints saved before EMA support existed have no stored
+        # ema_config; every historical run had no EMA at all, so None is the
+        # only sensible default to compare against -- same as scheduler_config.
+        checkpoint_ema_config = checkpoint.get("ema_config")
+        if checkpoint_ema_config != ema_config:
+            raise ValueError(
+                f"Checkpoint ema_config {checkpoint_ema_config} does not match "
+                f"the requested ema_config {ema_config}; pass matching "
+                "--ema/--ema-decay to resume."
+            )
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
@@ -288,6 +347,23 @@ def load_checkpoint_for_resume(
             "none was requested; the learning-rate schedule will NOT be resumed."
         )
 
+    ema_state = checkpoint.get("ema_state_dict")
+    if ema is not None:
+        if ema_state is not None:
+            ema.load_state_dict(ema_state)
+            print("Restored EMA state from checkpoint.")
+        else:
+            print(
+                "WARNING: --ema was requested but this checkpoint has no stored "
+                "EMA state (an older or non-EMA checkpoint); EMA is starting "
+                "fresh from the resumed live weights."
+            )
+    elif ema_state is not None:
+        print(
+            "WARNING: this checkpoint contains EMA state but --ema was not "
+            "requested; the EMA trajectory will NOT be resumed."
+        )
+
     return checkpoint["epoch"] + 1, checkpoint["best_val_psnr"], checkpoint["training_config"]
 
 
@@ -298,6 +374,7 @@ def train_one_epoch(
     loss_fn: nn.Module,
     device: torch.device,
     thermal_guard: GpuTemperatureGuard | None = None,
+    ema: ExponentialMovingAverage | None = None,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -310,6 +387,13 @@ def train_one_epoch(
         loss = loss_fn(outputs, targets)
         loss.backward()
         optimizer.step()
+        # EMA updates once per optimizer step, immediately after it -- so the
+        # very first update happens after this epoch's first batch (or, on a
+        # resumed run, after the first batch following the resumed epoch;
+        # the shadow's prior trajectory was already restored before this
+        # loop started). The live model above is never modified by this.
+        if ema is not None:
+            ema.update(model)
         batch_size = inputs.shape[0]
         # loss.item() below blocks until this batch's GPU work has completed
         # (a CUDA tensor .item() call synchronizes implicitly), so the
@@ -460,6 +544,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--ema",
+        action="store_true",
+        help=(
+            "Maintain an exponential moving average of the model weights; validation "
+            "(and therefore scheduler decisions and best-checkpoint selection) uses the "
+            "EMA weights instead of the live training weights. Default: off."
+        ),
+    )
+    parser.add_argument(
+        "--ema-decay", type=float, default=0.999, help="EMA decay rate (ignored unless --ema)"
+    )
+    parser.add_argument(
         "--loss",
         type=str,
         choices=["l1", "mse", "charbonnier", "l1_ssim"],
@@ -599,6 +695,14 @@ def main() -> None:
     if scheduler is not None:
         print(f"Scheduler: {scheduler_config}")
 
+    ema_config = build_ema_config(args.ema, args.ema_decay)
+    # Deep-copies model's current weights (freshly initialized here, pre-resume) --
+    # never zeros. If resuming into an EMA run, load_checkpoint_for_resume() below
+    # overwrites this initial copy with the checkpoint's actual saved EMA state.
+    ema = ExponentialMovingAverage(model, ema_config["decay"]).to(device) if ema_config else None
+    if ema is not None:
+        print(f"EMA: {ema_config}")
+
     training_config = {
         "epochs": args.epochs,
         "batch_size": args.batch_size,
@@ -629,6 +733,8 @@ def main() -> None:
             scheduler=scheduler,
             loss_config=loss_config,
             scheduler_config=scheduler_config,
+            ema=ema,
+            ema_config=ema_config,
         )
         print(
             f"Resumed from {args.resume}: continuing at epoch {start_epoch} "
@@ -649,9 +755,16 @@ def main() -> None:
         started = time.time()
         epoch_lr = current_lr(optimizer)
         train_loss = train_one_epoch(
-            model, train_loader, optimizer, loss_fn, device, thermal_guard
+            model, train_loader, optimizer, loss_fn, device, thermal_guard, ema=ema
         )
-        val_metrics = validate(model, validation_loader, loss_fn, device, thermal_guard)
+        # Validation (and therefore the scheduler decision and best-checkpoint
+        # selection below, both of which only ever see val_metrics) uses the EMA
+        # shadow weights when EMA is enabled, instead of the live training
+        # weights -- this is the entire point of Experiment 19. The live model
+        # keeps training normally regardless; only which weights get *scored*
+        # changes.
+        eval_model = ema.shadow_model if ema is not None else model
+        val_metrics = validate(eval_model, validation_loader, loss_fn, device, thermal_guard)
         # Wall-clock only: includes any thermal-pause sleep time when the
         # guard is enabled and triggered. Not compensated for -- "Epoch time"
         # is elapsed wall-clock time, same as before this feature existed.
@@ -697,6 +810,8 @@ def main() -> None:
             scheduler=scheduler,
             scheduler_config=scheduler_config,
             loss_config=loss_config,
+            ema=ema,
+            ema_config=ema_config,
         )
         if is_new_best:
             save_checkpoint(
@@ -710,6 +825,8 @@ def main() -> None:
                 scheduler=scheduler,
                 scheduler_config=scheduler_config,
                 loss_config=loss_config,
+                ema=ema,
+                ema_config=ema_config,
             )
             print(f"New best checkpoint saved ({best_path}); Val PSNR={best_val_psnr:.4f} dB")
 

@@ -333,3 +333,41 @@ primary-metric (PSNR) success bar. **Ensembling rejected.**
 **Experiment 16 + x8 TTA remains the overall champion pipeline: PSNR
 27.8154 dB, SSIM 0.750571, L1 0.032998.** No further experiments were
 started automatically.
+
+### Experiment 19 (prepared, not yet run — EMA weight averaging)
+
+Tests whether an exponential moving average (EMA) of `ResidualSRNet`'s
+weights improves validation PSNR, as the sole variable against Experiment
+6's proven recipe (from scratch, 60 epochs). `src/ema.py::ExponentialMovingAverage`
+is generic training infrastructure (works with any `nn.Module`; `ResidualSRNet`
+itself is unmodified) — initializes a shadow copy from the model's current
+(never zero) weights, and updates it once per optimizer step:
+`ema_param = decay * ema_param + (1 - decay) * live_param` (verified
+numerically: 1→3 at decay=0.9 gives exactly 1.2). Training loss always uses
+the live weights; **validation (and therefore the scheduler decision and
+best-checkpoint selection) uses the EMA shadow instead** — a one-line change
+in the training loop (`eval_model = ema.shadow_model if ema else model`),
+with `validate()` itself completely unmodified.
+
+Checkpoints gained two new keys: `ema_state_dict` (the EMA shadow's weights,
+`None` when disabled) and `ema_config` (`{"enabled": True, "decay": 0.999}`
+or `None`) — `model_state_dict` still always means the live/raw weights, in
+every checkpoint, so no historical loader changes. `evaluate_checkpoint.py`'s
+`load_model()` gained `prefer_ema: bool = True`: when EMA state is present,
+those weights load automatically (matching the checkpoint's recorded PSNR)
+with zero CLI/code changes needed in `evaluate_checkpoint.py`/`infer_test.py`
+themselves. Resume mismatch checks (EMA↔non-EMA, different decay) are
+strict and reject cleanly, while historical non-EMA checkpoints resume
+exactly as before — `--ema`/`--ema-decay` default off. **Next step: the
+real 60-epoch run**, e.g.:
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 \
+  --epochs 60 --checkpoint-dir checkpoints/exp19_ema
+```
+
+then compare against the current champion pipeline, Experiment 16 + x8 TTA
+(27.8154 dB / 0.750571 / 0.032998). **This run has not been started.**
