@@ -2948,12 +2948,12 @@ checkpoints.
 
 ## Status
 
-**PLANNED / PREPARED.** Implementation, parity tests, the full fast test
-suite, CUDA sanity, and a tiny real-data smoke test are complete and
-passing. **No real training run has been started.** The smoke-run metrics
+**COMPLETED.** The real Experiment 17 training run
+(`checkpoints/exp17_bicubic_residual/`, trained from scratch, full canonical
+60-epoch recipe below) ran to completion. The smoke-run metrics further
 below are infrastructure-verification artifacts only (1+1 epochs, 32 train /
-16 val samples, freshly initialized weights) and must not be compared
-against any other experiment's numbers.
+16 val samples, freshly initialized weights) and are unrelated to this real
+result.
 
 ## Hypothesis
 
@@ -3188,23 +3188,168 @@ compared against Experiment 6/9/10/11/12/13/14/15/16.
 SHA-256-hashed before and after this preparation task; every hash is
 unchanged.
 
-## Result
+## Real Training Run
 
-**TBD.** No real Experiment 17 training run has been started. The next step
-is a from-scratch screening run:
+Exact Experiment 17 configuration (`ResidualSRBicubic`, 64F/8B, 630,724
+params), trained **from scratch** (not fine-tuned from any existing
+checkpoint) with the full controlled recipe: L1 loss, crop96 LR / crop192
+GT, batch16, seed42, Adam (initial LR 1e-4), `ReduceLROnPlateau` (factor
+0.5, patience 3, min LR 1e-6), 60 epochs (`training_config` confirms
+`epochs: 60`; no extension to 70 was run -- no
+`checkpoints/exp17_bicubic_residual_extended*` directory exists), canonical
+split, full-image validation on all 640 validation samples, best checkpoint
+selected by validation PSNR.
 
-```bash
-python train.py --model residual_sr_bicubic --num-features 64 --num-blocks 8 \
-  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
-  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
-  --epochs 40 --checkpoint-dir checkpoints/exp17_bicubic_residual
+Checkpoint: `checkpoints/exp17_bicubic_residual/checkpoint_best.pt`.
+Independently re-verified:
+
+```
+--tta none:
+Loaded checkpoint checkpoints/exp17_bicubic_residual/checkpoint_best.pt (epoch=60, best_val_psnr=27.745965460790693)
+Val L1: 0.033260   Val PSNR: 27.7460 dB   Val SSIM: 0.748557
+PSNR vs bicubic: +4.6047 dB   SSIM vs bicubic: +0.197953
+
+--tta x8:
+Val L1: 0.033066   Val PSNR: 27.7942 dB   Val SSIM: 0.750434
+PSNR vs bicubic: +4.6529 dB   SSIM vs bicubic: +0.199830
 ```
 
-then compare with `evaluate_checkpoint.py --checkpoint
-checkpoints/exp17_bicubic_residual/checkpoint_best.pt` against Experiment 16
-non-TTA (27.7656 dB / 0.748618) and, if promising, evaluate `--tta x8`
-against the current best overall pipeline (Experiment 16 + x8 TTA,
-27.8154 dB / 0.750571). **This run has not been started.**
+| Metric | Exp 16 non-TTA | Exp 17 non-TTA | Exp 16 + x8 | Exp 17 + x8 |
+| --- | ---: | ---: | ---: | ---: |
+| Val L1 | 0.033206 | 0.033260 | 0.032998 | 0.033066 |
+| Val PSNR | 27.7656 dB | 27.7460 dB | **27.8154 dB** | 27.7942 dB |
+| Val SSIM | 0.748618 | 0.748557 | **0.750571** | 0.750434 |
+
+## Conclusion
+
+**Bicubic residual learning is highly competitive but did not beat the
+direct ResidualSR champion**, in either the non-TTA (-0.0196 dB vs.
+Experiment 16) or x8 (-0.0212 dB vs. Experiment 16 + x8) comparison. Both
+gaps are small -- this is by far the closest any alternative formulation
+has come to the champion (closer than Experiments 9, 11, 12, 13, 14) -- but
+consistently on the losing side, so the direct-prediction formulation
+remains preferred. Training from scratch (not fine-tuned) confirms this is a
+genuine architectural comparison, not an artifact of initialization.
+**Experiment 16 + x8 TTA (27.8154 dB / 0.750571 / 0.032998) remains the
+overall champion pipeline.** `checkpoints/exp17_bicubic_residual/checkpoint_best.pt`
+and `checkpoint_latest.pt` are retained for reproducibility, unmodified --
+and, notably, are reused directly as Experiment 18's second ensemble member
+(see below) rather than discarded, since "did not individually win" does not
+imply "has nothing to contribute to an ensemble."
+
+---
+
+# Experiment 18 — Experiment 16 + Experiment 17 Model Ensemble
+
+## Status
+
+**COMPLETED.** Inference-only: no epochs, no optimizer, no scheduler, no new
+checkpoints. Reuses the existing Experiment 11 ensemble infrastructure
+(`src/ensemble.py::weighted_average_predictions`, `evaluate_ensemble.py`)
+unmodified.
+
+## Hypothesis
+
+Experiment 16 (direct HR prediction) and Experiment 17 (bicubic + learned
+residual) differ in output formulation despite sharing the same learned-branch
+topology and training recipe. Since Experiment 17 came unusually close to
+Experiment 16 (-0.0196 dB non-TTA, -0.0212 dB with x8 -- the smallest gap of
+any alternative tried), their reconstruction errors might be partially
+complementary, making this a more promising ensemble candidate than
+Experiment 11 (Exp6 + the substantially weaker Exp9).
+
+## Ensemble Semantics Verified (no code changes)
+
+- Both models reconstructed from checkpoint `model_config` via the existing
+  `build_model` factory (`evaluate_checkpoint.load_model`) -- automatically
+  supports `residual_sr_bicubic` with zero special-casing, since the factory
+  already had it wired in from Experiment 17.
+- Predictions combined as raw floating-point tensors
+  (`weighted_average_predictions`); metric clipping happens only inside
+  `psnr`/`ssim` afterward -- confirmed by reading the code path, matching
+  Experiment 11's already-verified behavior.
+- No individual prediction is clipped before averaging.
+- x8 behavior: `predict_x8` is called on each *complete* model (bicubic skip
+  included, for Experiment 17) once per D4 transform; `evaluate_ensemble.py`
+  then only averages the two complete outputs -- the bicubic term is added
+  exactly once (inside `ResidualSRBicubic.forward`), never a second time by
+  the ensemble script. Confirmed by code inspection; this exact behavior was
+  already covered by a dedicated Experiment 17 test
+  (`test_x8_tta_averages_the_complete_model_output_not_bicubic_twice`).
+- No working code was rewritten.
+
+## Non-TTA Weight Tests (3 pre-declared weights, full 640-image validation)
+
+| Weight (Exp16 / Exp17) | Val L1 | Val PSNR | Val SSIM | PSNR vs bicubic | SSIM vs bicubic |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 50 / 50 | 0.033116 | 27.7845 dB | 0.749675 | +4.6432 dB | +0.199071 |
+| 75 / 25 | 0.033132 | 27.7822 dB | 0.749419 | +4.6409 dB | +0.198815 |
+| 87.5 / 12.5 | 0.033162 | 27.7757 dB | 0.749086 | +4.6344 dB | +0.198482 |
+
+Strongest non-TTA weighting by PSNR: **50/50 (27.7845 dB)**, followed by
+75/25 (27.7822 dB) -- a gap of **0.0023 dB**, at or below the 0.01 dB
+threshold specified for testing both top weightings with x8.
+
+## x8 Test
+
+Per the pre-declared rule (top two non-TTA weightings within 0.01 dB PSNR of
+each other -> evaluate both with x8), both 50/50 and 75/25 were run with
+`--tta x8`:
+
+| Weight (Exp16 / Exp17) | Val L1 | Val PSNR | Val SSIM | PSNR vs bicubic | SSIM vs bicubic |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 50 / 50 + x8 | 0.033008 | 27.8111 dB | 0.750709 | +4.6698 dB | +0.200105 |
+| 75 / 25 + x8 | 0.032997 | 27.8149 dB | 0.750692 | +4.6736 dB | +0.200088 |
+
+## Comparison Against the Target
+
+| Pipeline | Val L1 | Val PSNR | Val SSIM |
+| --- | ---: | ---: | ---: |
+| Exp 16 (non-TTA) | 0.033206 | 27.7656 dB | 0.748618 |
+| Exp 16 + x8 (**current champion**) | 0.032998 | **27.8154 dB** | 0.750571 |
+| Exp 17 (non-TTA) | 0.033260 | 27.7460 dB | 0.748557 |
+| Exp 17 + x8 | 0.033066 | 27.7942 dB | 0.750434 |
+| 50/50 (non-TTA) | 0.033116 | 27.7845 dB | 0.749675 |
+| 75/25 (non-TTA) | 0.033132 | 27.7822 dB | 0.749419 |
+| 87.5/12.5 (non-TTA) | 0.033162 | 27.7757 dB | 0.749086 |
+| 50/50 + x8 | 0.033008 | 27.8111 dB | 0.750709 |
+| **75/25 + x8 (best ensemble)** | **0.032997** | 27.8149 dB | **0.750692** |
+
+The best ensemble configuration (75/25 + x8) reaches **27.8149 dB**, which is
+**0.0005 dB below** the champion's 27.8154 dB on the primary ranking metric
+(PSNR) -- it does not satisfy the pre-declared success rule (`ensemble + x8
+> 27.8154`). Its L1 (0.032997 vs. 0.032998) and SSIM (0.750692 vs. 0.750571)
+are both marginally *better* than the champion's, but PSNR was designated
+the primary ranking metric in advance, and by that metric this is a
+(negligible) loss, not a win.
+
+## Conclusion
+
+**Ensembling is rejected.** 75/25 + x8 essentially ties Experiment 16 + x8
+(differences on the order of a few ten-thousandths of a dB either way --
+within measurement noise), but does not exceed it on the pre-declared
+primary metric. Per the pre-declared success rule, **Experiment 16 + x8 TTA
+remains the champion pipeline: PSNR 27.8154 dB, SSIM 0.750571, L1 0.032998.**
+No further weight exploration was performed (a dense sweep was explicitly
+out of scope, to avoid over-tuning the validation set) and no new experiment
+was started automatically, per instructions.
+
+## Historical Checkpoint Safety
+
+This experiment is inference-only and performed no writes to
+`checkpoints/exp16_extended70/` or `checkpoints/exp17_bicubic_residual/` --
+`evaluate_ensemble.py` only loads checkpoints (`torch.load`) and prints
+metrics; it never calls `torch.save`. No hash re-verification was necessary
+beyond this structural guarantee, consistent with every prior
+`evaluate_ensemble.py`/`evaluate_checkpoint.py` use in this project.
+
+## Tests
+
+No code changes were required (the existing Experiment 11 ensemble
+infrastructure already supported `residual_sr_bicubic` through the shared
+model factory), so no new tests were added. `pytest -m "not integration" -q`
+-> **394 passed, 8 deselected** (unchanged from Experiment 17 -- confirms
+nothing regressed).
 
 ---
 
@@ -3249,7 +3394,9 @@ above, which remains the only quantitative comparison in this log.
 | Exp 15 — Extended champion training | Resume Exp 6 latest checkpoint 40 -> 60 epochs, same recipe | 27.7626 dB | 0.748636 | Complete |
 | Exp 16 — Extended champion training | Resume Exp 15 latest checkpoint 60 -> 70 epochs, same recipe | 27.7656 dB | 0.748618 | Complete |
 | Exp 16 + x8 TTA | Inference-only self-ensemble on Exp 16 checkpoint | **27.8154 dB** | **0.750571** | Complete |
-| Exp 17 — Bicubic residual learning | ResidualSR learned branch + fixed bicubic global skip, trained from scratch | TBD | TBD | Planned / prepared |
+| Exp 17 — Bicubic residual learning | ResidualSR learned branch + fixed bicubic global skip, trained from scratch | 27.7460 dB | 0.748557 | Complete |
+| Exp 17 + x8 TTA | Inference-only self-ensemble on Exp 17 checkpoint | 27.7942 dB | 0.750434 | Complete |
+| Exp 18 — Exp16+Exp17 ensemble | Weighted average of Exp 16 + Exp 17 raw predictions (best: 75/25 + x8) | 27.8149 dB | 0.750692 | Complete (rejected) |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an
@@ -3288,6 +3435,21 @@ far, but still a clear regression. **Rejected; `ReduceLROnPlateau` remains
 this project's scheduler of choice.** Motivates Experiment 15's shift toward
 extending Experiment 6's own training horizon rather than changing the
 recipe further.
+
+Note: Exp 17 (bicubic + learned residual, trained from scratch, same
+topology/recipe as Exp 16) came the closest of any alternative to date
+(-0.0196 dB non-TTA, -0.0212 dB with x8, vs. Exp 16) but still did not win.
+**Rejected as an individual model**; its checkpoint was reused as Experiment
+18's second ensemble member rather than discarded.
+
+Note: Exp 18 (weighted ensemble of Exp 16 + Exp 17 raw predictions) tested
+three pre-declared non-TTA weights (50/50, 75/25, 87.5/12.5) plus x8 on the
+top two (50/50 and 75/25, within the pre-declared 0.01 dB tie-break
+threshold). Best result, 75/25 + x8: PSNR 27.8149 dB -- **0.0005 dB below**
+Exp 16 + x8's 27.8154 dB, a negligible but real shortfall against the
+pre-declared primary-metric success rule (SSIM/L1 were marginally better,
+but PSNR was designated primary in advance). **Rejected; Experiment 16 + x8
+TTA remains the champion pipeline.**
 
 Note: Exp 7's PSNR is numerically the highest on record, but the margin over Exp 6
 (+0.0011 dB) is negligible, Exp 7's SSIM/L1 are both slightly worse than Exp 6, and

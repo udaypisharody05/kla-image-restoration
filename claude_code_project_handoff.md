@@ -292,7 +292,7 @@ to epoch 70. Verified results:
 
 All of Experiments 6, 15, and 16's checkpoints are retained unmodified.
 
-### Experiment 17 (prepared, not yet run — bicubic residual learning)
+### Experiment 17 (completed — rejected individually, reused in Exp 18; bicubic residual learning)
 
 Tests whether explicitly learning only the restoration residual over a fixed
 bicubic 2x upsample (`prediction = fixed_bicubic_upsample(LR) +
@@ -306,25 +306,30 @@ mode="bicubic")`, not this project's PIL-based bicubic baseline
 (`src.baseline.bicubic_upscale`, left untouched) — the two are **not**
 bit-identical (measured max abs diff 0.0644 on a `[0,1]`-range test image),
 a documented, deliberate difference since PIL can't run efficiently inside a
-GPU training loop. Wired through the model factory as
-`architecture="residual_sr_bicubic"`; a zero-learned-residual parity test
-(zeroing the final conv's weight/bias) confirms the model's output then
-equals its own bicubic upsample **exactly** (max abs diff 0.0), verifying
-the global skip is wired correctly. `residual_sr`↔`residual_sr_bicubic`
-resume mismatches are rejected even though the underlying tensor shapes are
-identical (config equality, not shape equality, gates resume). x8 TTA works
-unmodified and does not double-add the bicubic term (verified). **Next
-step: a from-scratch screening run** (must NOT be initialized from Exp
-6/15/16 weights — this is a controlled architecture comparison, not
-fine-tuning), e.g.:
+GPU training loop. `residual_sr`↔`residual_sr_bicubic` resume mismatches are
+rejected even though the underlying tensor shapes are identical (config
+equality, not shape equality, gates resume).
 
-```bash
-python train.py --model residual_sr_bicubic --num-features 64 --num-blocks 8 \
-  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
-  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
-  --epochs 40 --checkpoint-dir checkpoints/exp17_bicubic_residual
-```
+**Real result** (trained from scratch, 60 epochs, `checkpoints/exp17_bicubic_residual/checkpoint_best.pt`,
+epoch 60): Val PSNR 27.7460 dB / SSIM 0.748557 (non-TTA); +x8 TTA: PSNR
+27.7942 dB / SSIM 0.750434. **Closest any alternative has come to the
+champion** (-0.0196 dB non-TTA, -0.0212 dB with x8, vs. Experiment 16) but
+still did not win. **Rejected as an individual model**; checkpoint retained
+and reused directly as Experiment 18's second ensemble member.
 
-then compare against Experiment 16 non-TTA (27.7656 dB / 0.748618) and the
-current best pipeline, Experiment 16 + x8 TTA (27.8154 dB / 0.750571).
-**This run has not been started.**
+### Experiment 18 (completed — rejected; Exp16 + Exp17 model ensemble)
+
+Inference-only (no training). Reused Experiment 11's ensemble infrastructure
+(`src/ensemble.py`, `evaluate_ensemble.py`) unmodified — it already supported
+`residual_sr_bicubic` automatically via the shared model factory. Three
+pre-declared non-TTA weights tested: 50/50 (27.7845 dB), 75/25 (27.7822 dB),
+87.5/12.5 (27.7757 dB). Top two (50/50, 75/25) were within the pre-declared
+0.01 dB tie-break threshold, so both were evaluated with x8: 50/50+x8 =
+27.8111 dB; **75/25+x8 = 27.8149 dB (best ensemble)**. This is **0.0005 dB
+below** Experiment 16 + x8's 27.8154 dB — essentially a tie (SSIM/L1 were
+marginally better for the ensemble) but does not clear the pre-declared
+primary-metric (PSNR) success bar. **Ensembling rejected.**
+
+**Experiment 16 + x8 TTA remains the overall champion pipeline: PSNR
+27.8154 dB, SSIM 0.750571, L1 0.032998.** No further experiments were
+started automatically.
