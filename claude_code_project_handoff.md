@@ -110,13 +110,22 @@ with different thermal settings than it was originally trained with is always le
 (thermal settings are recorded in `training_config` for reference only, never checked on
 resume).
 
-## Current best model (updated after Experiment 7; see EXPERIMENT_LOG.md for full history)
+## Current best model (updated after Experiment 16; see EXPERIMENT_LOG.md for full history)
 
-**Experiment 6 (`checkpoints/exp6_crop96/checkpoint_best.pt`) is the practical preferred
-configuration** — ResidualSRNet, 64 features / 8 residual blocks (630,724 params), L1
-loss, Adam, ReduceLROnPlateau, 96x96 LR training crop, 40 epochs, seed 42. Independently
-verified: Val PSNR 27.7090 dB, Val SSIM 0.745634, Val L1 0.033420 (+4.5677 dB / +0.195030
-over the 23.1413 dB / 0.550604 bicubic baseline).
+**Experiment 16 (`checkpoints/exp16_extended70/checkpoint_best.pt`, epoch 65) is the
+current champion checkpoint** — ResidualSRNet, 64 features / 8 residual blocks
+(630,724 params), same architecture/recipe as Experiment 6, extended via
+Experiments 15→16's continued `ReduceLROnPlateau`-controlled training (epochs
+41-70 total). Independently verified: Val PSNR 27.7656 dB, Val SSIM 0.748618,
+Val L1 0.033206 (non-TTA). **Experiment 16 + x8 TTA is the current best overall
+pipeline**: Val PSNR 27.8154 dB, Val SSIM 0.750571, Val L1 0.032998
+(+4.6741 dB / +0.199967 over the 23.1413 dB / 0.550604 bicubic baseline).
+
+Experiment 6 (`checkpoints/exp6_crop96/checkpoint_best.pt`) remains the original,
+from-scratch champion and the recipe every later experiment is still compared
+against: ResidualSRNet, 64F/8B, L1, Adam, ReduceLROnPlateau, 96x96 LR crop, 40
+epochs, seed 42. Independently verified: Val PSNR 27.7090 dB, Val SSIM 0.745634,
+Val L1 0.033420 (+4.5677 dB / +0.195030 over bicubic).
 
 - Experiment 5 (`checkpoints/exp5_l1_ssim/checkpoint_best.pt`) has the highest SSIM on
   record (0.747377) but lower PSNR (27.5282 dB) — kept as the best-SSIM reference only,
@@ -256,36 +265,66 @@ dispatch, with `T_max` always explicit and never derived from `--epochs`,
 and resume compatibility mirroring the existing `loss_config` strict-match
 pattern) — useful infrastructure kept regardless of this result.
 
-### Experiment 15 (prepared, not yet run — extended champion training)
+### Experiments 15 & 16 (completed — champion improved; extended training)
 
 With scheduler substitution (Exp 14) joining architecture/ensembling (Exp 9,
-11, 12, 13) as a failed attempt to beat Experiment 6, Experiment 15 asks a
-simpler question: does the champion configuration benefit from continued
-`ReduceLROnPlateau`-controlled training past its original 40-epoch budget?
-This is a direct **continuation** of Experiment 6's own run, not a new
-architecture or recipe. Resuming from `checkpoints/exp6_crop96/checkpoint_latest.pt`
-(the true end-of-epoch-40 state — not `checkpoint_best.pt`) restores: epoch
-40, best_val_psnr ≈27.7090 dB, and **current LR = 5e-05 exactly** (one
-plateau reduction occurred during the original run, with `num_bad_epochs=2`
-of `patience=3` — not yet exhausted). A dry (read-only) resume verification
-against the real checkpoint confirms `start_epoch=41` and full optimizer/
-scheduler state restoration, with **zero `train.py` code changes needed** —
-`--resume` and `--checkpoint-dir` are already independent, so training can
-resume from `checkpoints/exp6_crop96/checkpoint_latest.pt` while writing only
-to a new `checkpoints/exp15_extended60/` directory, leaving Experiment 6
-fully untouched. If epochs 41-60 never beat ~27.7090 dB, the new directory
-will correctly end up containing only `checkpoint_latest.pt` and no
-`checkpoint_best.pt` — expected, not a bug; `best_val_psnr` is deliberately
-never reset to force a fabricated new-best save. **Next step: the real
-extended run**, e.g.:
+11, 12, 13) as a failed attempt to beat Experiment 6, Experiments 15/16
+asked a simpler question instead: does the champion configuration benefit
+from continued `ReduceLROnPlateau`-controlled training past its original
+40-epoch budget? Both are direct **continuations** of Experiment 6's own
+run (`--resume`/`--checkpoint-dir` used as already-independent CLI args, no
+code changes), not a new architecture or recipe: Experiment 15 resumed from
+`checkpoints/exp6_crop96/checkpoint_latest.pt` (epoch 40, LR 5e-05) to
+epoch 60; Experiment 16 resumed from `checkpoints/exp15_extended60/checkpoint_latest.pt`
+to epoch 70. Verified results:
+
+- **Exp 15** (epoch 60): Val PSNR 27.7626 dB, Val SSIM 0.748636 — a modest
+  +0.0536 dB gain over Experiment 6.
+- **Exp 16** (best epoch 65 of 70; scheduler reached `min_lr=1e-6` by epoch
+  70): Val PSNR 27.7656 dB, Val SSIM 0.748618 — only +0.0030 dB over Exp 15,
+  essentially noise. **Epoch-extension is now saturated** — the one modest
+  gain available (Exp 15) has been captured; further blind extension is not
+  expected to help.
+- **Exp 16 + x8 TTA: PSNR 27.8154 dB, SSIM 0.750571, L1 0.032998** — this is
+  now the **current best overall pipeline**, surpassing Experiment 6 + x8
+  TTA (27.7689 dB / 0.747955). `checkpoints/exp16_extended70/checkpoint_best.pt`
+  (epoch 65) is the new champion checkpoint.
+
+All of Experiments 6, 15, and 16's checkpoints are retained unmodified.
+
+### Experiment 17 (prepared, not yet run — bicubic residual learning)
+
+Tests whether explicitly learning only the restoration residual over a fixed
+bicubic 2x upsample (`prediction = fixed_bicubic_upsample(LR) +
+learned_residual_branch(LR)`) improves over direct HR prediction.
+`src/models/residual_sr_bicubic.py::ResidualSRBicubic` reuses
+`ResidualSRNet`'s exact learned-branch topology (same `ResidualBlock`, same
+conv/PixelShuffle layout, **630,724 params — identical to Exp 6**, since the
+bicubic term has zero trainable parameters) with the sum computed at the
+very end and never clipped. The bicubic skip uses `torch.nn.functional.interpolate(
+mode="bicubic")`, not this project's PIL-based bicubic baseline
+(`src.baseline.bicubic_upscale`, left untouched) — the two are **not**
+bit-identical (measured max abs diff 0.0644 on a `[0,1]`-range test image),
+a documented, deliberate difference since PIL can't run efficiently inside a
+GPU training loop. Wired through the model factory as
+`architecture="residual_sr_bicubic"`; a zero-learned-residual parity test
+(zeroing the final conv's weight/bias) confirms the model's output then
+equals its own bicubic upsample **exactly** (max abs diff 0.0), verifying
+the global skip is wired correctly. `residual_sr`↔`residual_sr_bicubic`
+resume mismatches are rejected even though the underlying tensor shapes are
+identical (config equality, not shape equality, gates resume). x8 TTA works
+unmodified and does not double-add the bicubic term (verified). **Next
+step: a from-scratch screening run** (must NOT be initialized from Exp
+6/15/16 weights — this is a controlled architecture comparison, not
+fine-tuning), e.g.:
 
 ```bash
-python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+python train.py --model residual_sr_bicubic --num-features 64 --num-blocks 8 \
   --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
   --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
-  --epochs 60 --resume checkpoints/exp6_crop96/checkpoint_latest.pt \
-  --checkpoint-dir checkpoints/exp15_extended60
+  --epochs 40 --checkpoint-dir checkpoints/exp17_bicubic_residual
 ```
 
-then compare against Experiment 6 (27.7090 dB / 0.745634). **This run has
-not been started; epoch 41 has not been run.**
+then compare against Experiment 16 non-TTA (27.7656 dB / 0.748618) and the
+current best pipeline, Experiment 16 + x8 TTA (27.8154 dB / 0.750571).
+**This run has not been started.**

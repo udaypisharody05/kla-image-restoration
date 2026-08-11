@@ -375,7 +375,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        choices=["residual_sr", "edsr_lite", "nafnet_sr", "swinir_lite"],
+        choices=["residual_sr", "edsr_lite", "nafnet_sr", "swinir_lite", "residual_sr_bicubic"],
         default="residual_sr",
         help="Architecture. 'residual_sr' (default) reproduces Experiments 1-8 exactly.",
     )

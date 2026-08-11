@@ -12,6 +12,7 @@ from torch import nn
 from .edsr_lite import EDSRLite, EDSRResidualBlock
 from .nafnet_sr import NAFBlock, NAFNetSR
 from .residual_sr import ResidualBlock, ResidualSRNet
+from .residual_sr_bicubic import ResidualSRBicubic, fixed_bicubic_upsample
 from .swinir_lite import SwinIRLite, SwinTransformerBlock
 
 __all__ = [
@@ -23,6 +24,8 @@ __all__ = [
     "NAFNetSR",
     "SwinTransformerBlock",
     "SwinIRLite",
+    "ResidualSRBicubic",
+    "fixed_bicubic_upsample",
     "build_model_config",
     "build_model",
 ]
@@ -95,6 +98,15 @@ def build_model_config(
             "mlp_ratio": mlp_ratio,
             "scale": scale,
         }
+    if architecture == "residual_sr_bicubic":
+        return {
+            "architecture": "residual_sr_bicubic",
+            "in_channels": in_channels,
+            "out_channels": out_channels,
+            "num_features": num_features,
+            "num_blocks": num_blocks,
+            "scale": scale,
+        }
     raise ValueError(f"Unknown architecture: {architecture}")
 
 
@@ -144,6 +156,14 @@ def build_model(model_config: dict) -> nn.Module:
             num_heads=model_config["num_heads"],
             window_size=model_config["window_size"],
             mlp_ratio=model_config["mlp_ratio"],
+            scale=model_config["scale"],
+        )
+    if architecture == "residual_sr_bicubic":
+        return ResidualSRBicubic(
+            in_channels=model_config["in_channels"],
+            out_channels=model_config["out_channels"],
+            num_features=model_config["num_features"],
+            num_blocks=model_config["num_blocks"],
             scale=model_config["scale"],
         )
     raise ValueError(f"Unknown architecture: {architecture}")

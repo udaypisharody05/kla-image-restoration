@@ -2733,10 +2733,18 @@ retained for reproducibility, unmodified.
 
 ## Status
 
-**PLANNED / PREPARED.** Resume-state inspection and a dry (read-only) resume
-verification are complete. **No real training has been started; epoch 41 has
-not been run.** This is not a new architecture experiment -- it is a direct
-continuation of Experiment 6's own training run.
+**COMPLETED.** The real Experiment 15 run (`checkpoints/exp15_extended60/`,
+resumed from `checkpoints/exp6_crop96/checkpoint_latest.pt`, epochs 41-60)
+ran to completion. Independently re-verified via `evaluate_checkpoint.py
+--checkpoint checkpoints/exp15_extended60/checkpoint_best.pt --tta none`:
+best epoch **60**, Val L1 **0.033210**, Val PSNR **27.7626 dB**, Val SSIM
+**0.748636** (+4.6213 dB / +0.198032 vs. bicubic) -- essentially flat versus
+Experiment 6's epoch-38/40 result (27.7090 dB), i.e. a small further gain
+from continued training (+0.0536 dB over Exp6) rather than a new plateau
+regression. Superseded by Experiment 16 (a further continuation to epoch 70);
+see that entry for the full extended-training conclusion. Both
+`checkpoints/exp15_extended60/checkpoint_best.pt` and `checkpoint_latest.pt`
+are retained for reproducibility, unmodified.
 
 ## Hypothesis
 
@@ -2857,22 +2865,346 @@ hash unchanged. **Experiment 6 remains fully immutable.**
 
 ## Result
 
-**TBD.** No real Experiment 15 training run has been started; epoch 41 has
-not been run. The next step is the real extended run:
+**epoch 60: Val L1 = 0.033210, Val PSNR = 27.7626 dB, Val SSIM = 0.748636**
+(+4.6213 dB / +0.198032 vs. bicubic; +0.0536 dB / +0.003002 vs. Experiment
+6's epoch-38 result of 27.7090 dB / 0.745634). 20 additional
+`ReduceLROnPlateau`-controlled epochs produced a modest further gain rather
+than a plateau -- motivating Experiment 16's further extension to epoch 70
+(see that entry for the point at which extended training saturates).
 
-```bash
-python train.py --model residual_sr --num-features 64 --num-blocks 8 \
-  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
-  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
-  --epochs 60 --resume checkpoints/exp6_crop96/checkpoint_latest.pt \
-  --checkpoint-dir checkpoints/exp15_extended60
+---
+
+# Experiment 16 — Extended Champion Training (Continued, 60 -> 70 Epochs)
+
+## Status
+
+**COMPLETED.** A further continuation of Experiment 15
+(`checkpoints/exp16_extended70/`, resumed from
+`checkpoints/exp15_extended60/checkpoint_latest.pt`, epochs 61-70) ran to
+completion.
+
+## Hypothesis
+
+Experiment 15 (epochs 41-60) produced a modest gain over Experiment 6
+(+0.0536 dB), without yet showing clear saturation. Experiment 16 tests
+whether continuing another 10 epochs (61-70) under the identical
+`ReduceLROnPlateau`-controlled recipe continues to help, plateaus, or
+reverses -- i.e. whether simple epoch-extension is a repeatable way to
+improve the champion, or a one-time gain that has now been exhausted.
+
+## Real Training Run
+
+Resumed from `checkpoints/exp15_extended60/checkpoint_latest.pt` into
+`checkpoints/exp16_extended70/` (Experiment 15's directory untouched), same
+recipe as every prior extension: `ResidualSRNet` 64F/8B, L1, crop96/192,
+batch16, seed42, Adam, `ReduceLROnPlateau` (factor 0.5, patience 3,
+min_lr 1e-6), target epoch 70.
+
+Checkpoint: `checkpoints/exp16_extended70/checkpoint_best.pt`. Independently
+re-verified:
+
+```
+Loaded checkpoint checkpoints/exp16_extended70/checkpoint_best.pt (epoch=65, best_val_psnr=27.765574385729558)
+--tta none:
+Val L1: 0.033206   Val PSNR: 27.7656 dB   Val SSIM: 0.748618
+PSNR vs bicubic: +4.6243 dB   SSIM vs bicubic: +0.198014
+
+--tta x8:
+Val L1: 0.032998   Val PSNR: 27.8154 dB   Val SSIM: 0.750571
+PSNR vs bicubic: +4.6741 dB   SSIM vs bicubic: +0.199967
 ```
 
-then compare `checkpoints/exp15_extended60/checkpoint_latest.pt` (and
-`checkpoint_best.pt`, if one is produced) against Experiment 6
-(27.7090 dB / 0.745634) to see whether 20 additional
-`ReduceLROnPlateau`-controlled epochs improve on the established champion.
-**This run has not been started.**
+| Metric | Exp 15 (epoch 60) | Exp 16 non-TTA (epoch 65) | Exp 16 + x8 TTA |
+| --- | ---: | ---: | ---: |
+| Val L1 | 0.033210 | 0.033206 | 0.032998 |
+| Val PSNR | 27.7626 dB | 27.7656 dB | **27.8154 dB** |
+| Val SSIM | 0.748636 | 0.748618 | **0.750571** |
+
+Best epoch was **65**, not 70: by epoch 70 (`checkpoint_latest.pt`), the
+scheduler had reduced LR to exactly `min_lr = 1e-6` (`num_bad_epochs=1` at
+that point) with no further validation-PSNR improvement recorded after epoch
+65's checkpoint. Improvement from epoch 60 -> 65: **PSNR +0.0030 dB, SSIM
+-0.000018, L1 -0.000004** -- essentially noise-level.
+
+## Conclusion
+
+**Additional training beyond epoch 60 produced only a negligible
+improvement, and the scheduler bottomed out at `min_lr` by epoch 70.**
+Simple epoch-extension of the champion configuration is therefore
+**saturated** -- Experiments 15 and 16 together show the technique had one
+modest gain available (+0.0536 dB from epochs 41-60) that is now exhausted;
+further blind extension is not expected to help without changing something
+else about the training recipe. **Experiment 16 + x8 TTA is now the current
+best overall pipeline: PSNR 27.8154 dB, SSIM 0.750571, L1 0.032998**
+(+4.6741 dB / +0.199967 vs. bicubic), surpassing the previous best pipeline
+(Experiment 6 + x8 TTA, 27.7689 dB / 0.747955). `checkpoints/exp16_extended70/checkpoint_best.pt`
+(epoch 65) is the new champion checkpoint; both it and `checkpoint_latest.pt`
+(epoch 70) are retained, unmodified, alongside all of Experiments 6 and 15's
+checkpoints.
+
+---
+
+# Experiment 17 — Bicubic Residual Learning
+
+## Status
+
+**PLANNED / PREPARED.** Implementation, parity tests, the full fast test
+suite, CUDA sanity, and a tiny real-data smoke test are complete and
+passing. **No real training run has been started.** The smoke-run metrics
+below are infrastructure-verification artifacts only (1+1 epochs, 32 train /
+16 val samples, freshly initialized weights) and must not be compared
+against any other experiment's numbers.
+
+## Hypothesis
+
+Providing a fixed bicubic-upsampled LR as a global reconstruction path may
+let the network focus its capacity on denoising and high-frequency
+correction (a residual over a already-reasonable baseline) rather than
+relearning the entire 2x image-formation mapping from scratch, as the direct
+formulation (Experiments 1-16) requires. This is a controlled, single-variable
+test: same learned-branch topology as the champion, same full training
+recipe, trained from scratch (not fine-tuned from any existing checkpoint) --
+only the presence of the fixed bicubic skip changes.
+
+Baseline for comparison (direct HR prediction, no bicubic skip):
+- Experiment 16 non-TTA: **27.7656 dB** / 0.748618 SSIM / 0.033206 L1
+- Current best overall pipeline, Experiment 16 + x8 TTA: **27.8154 dB** /
+  0.750571 SSIM / 0.032998 L1
+
+## Bicubic Implementation
+
+**Existing repository baseline** (`src.baseline.bicubic_upscale`, used by
+`evaluate_baseline.py` and every "vs. bicubic" delta in this log): resizes a
+2D numpy array via `PIL.Image.fromarray(..., mode="F").resize(...,
+resample=Image.Resampling.BICUBIC)` -- a CPU-only, PIL-based bicubic
+implementation. **This file is completely untouched by Experiment 17.**
+
+**Experiment 17's in-model bicubic skip** (`src/models/residual_sr_bicubic.py::
+fixed_bicubic_upsample`): `torch.nn.functional.interpolate(x, scale_factor=scale,
+mode="bicubic", align_corners=False)` -- PyTorch's native bicubic, chosen
+because it runs on-device (GPU) inside a batched forward pass without a CPU
+round-trip, which `PIL.Image.resize` cannot do efficiently at training time.
+
+**These are not bit-identical** -- different library, different convolution
+kernel/anti-aliasing behavior. Measured directly (same 16x16 synthetic
+grayscale input, both upscaled 2x): **max abs difference 0.0644, mean abs
+difference 0.0182** (on a `[0,1]`-range image). This is a deliberate,
+documented divergence, not an oversight -- `fixed_bicubic_upsample` optimizes
+for "runs efficiently inside a PyTorch forward pass," while
+`bicubic_upscale` optimizes for "matches the classical baseline every other
+experiment is compared against." Every experiment's "vs. bicubic" delta
+continues to use the unmodified `src.baseline.bicubic_upscale`/
+`evaluate_baseline.py` pipeline; Experiment 17's internal skip is purely an
+architectural component, invisible to metric computation.
+
+## Architecture
+
+`src/models/residual_sr_bicubic.py::ResidualSRBicubic` -- `ResidualSRNet`'s
+exact learned branch (imports and reuses `ResidualBlock` directly; identical
+`conv_in`/`body`/`conv_body_out`/`upsample_conv`/`pixel_shuffle` layout, no
+new blocks, channels, normalization, activations, or residual scaling), with
+the final step changed from "return the learned branch's output" to:
+
+```
+prediction = fixed_bicubic_upsample(LR) + learned_residual_branch(LR)
+```
+
+```
+Noisy LR ---------------------------> fixed_bicubic_upsample --------+
+  |                                                                  |
+  v                                                                  |
+3x3 conv (in_channels -> num_features)                              |
+  |                                                                  |
+  v                                                                  |
+num_blocks x ResidualBlock                                          |
+  |                                                                  |
+  v                                                                  |
+3x3 conv ("conv_body_out") -> + (local skip, same as ResidualSRNet) |
+  |                                                                  |
+  v                                                                  |
+3x3 conv (-> out_channels*scale^2) -> PixelShuffle(scale)           |
+  |                                                                  |
+  v                                                                  |
+learned residual -----------------------------------------------> + -> raw prediction
+```
+
+Trained with `nn.L1Loss()(prediction, GT)` directly -- the residual branch is
+never trained against a separately constructed target; the loss only ever
+sees the final summed prediction, exactly as specified.
+
+**Parameter count: 630,724** -- identical to Experiment 6 (`ResidualSRNet`
+64F/8B), since `fixed_bicubic_upsample` contributes zero trainable
+parameters and no other change was made to the learned branch. Verified by a
+direct test comparing parameter counts against a plain `ResidualSRNet` built
+with the same `num_features`/`num_blocks`.
+
+## Raw Output / Clipping Behavior
+
+The bicubic term is **never clipped** before being added to the residual,
+and the summed output is **never clipped** either -- exactly like every
+other architecture in this project. A model with the final `upsample_conv`
+weight/bias zeroed (learned residual forced to exactly zero) produces output
+identical to `fixed_bicubic_upsample(LR)` to float32 tolerance (max abs diff
+**0.0**, i.e. exact) -- confirming the global skip is wired correctly and
+isolates its effect cleanly. Feeding an input far outside `[0,1]` (constant
+5.0, and separately constant -5.0) produces output correspondingly far
+outside `[0,1]` in both directions, confirming no clamp exists anywhere in
+`forward`. Metric-time clipping remains entirely the existing
+`src/metrics.py` pipeline's responsibility, unmodified.
+
+## Model Factory / CLI
+
+- `src/models/__init__.py`: `build_model_config`/`build_model` extended with
+  `architecture="residual_sr_bicubic"`, reusing `num_features`/`num_blocks`/
+  `scale` -- no new parameters needed since the bicubic behavior is intrinsic
+  to the architecture, not configurable. `residual_sr`/`edsr_lite`/
+  `nafnet_sr`/`swinir_lite` configs and reconstruction are byte-for-byte
+  unchanged; default architecture remains `residual_sr`.
+- `train.py --model` gains the `residual_sr_bicubic` choice. No new CLI
+  flags -- `--num-features`/`--num-blocks` are reused exactly as they already
+  are for `residual_sr`/`edsr_lite`/`nafnet_sr`.
+- `evaluate_checkpoint.py`/`infer_test.py` require **no changes** -- both
+  already reconstruct models exclusively through `build_model`.
+- `src/tta.py` (x8 geometric self-ensemble) required **no changes** and does
+  **not** double-add the bicubic term: `predict_x8` calls the complete model
+  (bicubic skip included) once per D4 transform, inverse-transforms each
+  complete raw prediction, and averages those -- verified by a dedicated
+  test cross-checking `predict_x8`'s output against a manual step-by-step
+  recomputation using the same primitives.
+
+### Exact `model_config`
+
+```python
+{
+    "architecture": "residual_sr_bicubic",
+    "in_channels": 1,
+    "out_channels": 1,
+    "num_features": 64,
+    "num_blocks": 8,
+    "scale": 2,
+}
+```
+
+## Checkpoint / Resume Compatibility
+
+Verified by `tests/test_training_unit.py`:
+
+- Matching `residual_sr_bicubic` checkpoint + config -> resume succeeds
+  (weights restored exactly, epoch/best-PSNR continuation correct).
+- `residual_sr` checkpoint + `residual_sr_bicubic` request -> **rejected**,
+  even though the underlying learned-branch tensor shapes are identical
+  (the missing `"architecture"` key vs. the present one makes the configs
+  unequal, so the existing dict-equality check in `load_checkpoint_for_resume`
+  catches this with zero new comparison logic -- the same mechanism already
+  protecting `edsr_lite`/`nafnet_sr`/`swinir_lite`).
+- `residual_sr_bicubic` checkpoint + `residual_sr` request -> rejected.
+- Legacy (no-`"architecture"`-key) checkpoints (Experiments 1-8) still
+  reconstruct as `ResidualSRNet`, unchanged.
+
+## Tests
+
+26 new tests: `tests/test_residual_sr_bicubic_unit.py` (18 -- construction,
+exact parameter count, 96x96/128x128/batch16 shapes, finiteness, gradients,
+bicubic-skip parameter-freeness, device/dtype preservation, the zero-residual
+exact-parity test, unclamped-output tests in both directions, x8 TTA
+shape/finiteness and the no-double-bicubic cross-check), plus factory tests
+in `tests/test_model_unit.py` (3) and checkpoint/resume/loading tests in
+`tests/test_training_unit.py` (5).
+
+`pytest -m "not integration" -q` -> **394 passed, 8 deselected** (up from
+368; every pre-existing test, including all TTA, ensemble, and every other
+architecture's tests, remains unchanged and passing).
+
+## CUDA Sanity Check
+
+Short check only (not a sustained benchmark), exact Experiment 17
+configuration, `batch=16`, `input=[16,1,96,96]`, `loss=L1`, `optimizer=Adam`,
+forward -> loss -> backward -> optimizer step, 10 timed iterations after 3
+discarded warmup iterations:
+
+| Check | Result |
+| --- | --- |
+| Device | NVIDIA GeForce RTX 4060 Laptop GPU (CUDA) |
+| Parameter count | 630,724 |
+| Output shape | `(16, 1, 192, 192)` (matches expected exactly) |
+| Output finite | True |
+| Loss finite | True |
+| All gradients finite | True |
+| Peak allocated CUDA memory | 778.7 MiB |
+| Peak reserved CUDA memory | 876.0 MiB |
+| Per-batch runtime (avg of 10) | 101.0 ms |
+| OOM | None |
+
+Memory usage is essentially identical to Experiment 6 (same learned-branch
+parameter count); the small runtime increase over a plain `ResidualSRNet`
+forward pass is attributable to the added `F.interpolate` bicubic op.
+
+## Real-Data Smoke Test (infrastructure verification only -- not a result)
+
+```bash
+python train.py --model residual_sr_bicubic --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --epochs 1 --max-train-samples 32 --max-val-samples 16 \
+  --checkpoint-dir checkpoints/exp17_bicubic_residual_smoke --num-workers 0
+```
+
+Verified and then deleted (`checkpoints/exp17_bicubic_residual_smoke/`, not
+committed):
+
+- CUDA used; printed `Model: residual_sr_bicubic (630,724 trainable
+  parameters)` and the exact `model_config` above.
+- Training and validation both completed (0.8s); validation ran on real
+  full-size (128x128) LR images. Notably, even after 1 epoch on 32 samples
+  the smoke checkpoint's Val PSNR (~18.7 dB) was far above the near-random
+  results other architectures' 1-epoch smoke runs typically show (~7-13 dB)
+  -- consistent with (but not proof of) the hypothesis, since the bicubic
+  skip gives the model a reasonable starting point before the learned branch
+  has meaningfully trained. **This is a smoke-test artifact, not a result,
+  and is not being treated as evidence for or against the hypothesis.**
+- `evaluate_checkpoint.py --tta none` and `--tta x8` both loaded the smoke
+  checkpoint and ran to completion with finite metrics.
+- `infer_test.py`'s model-loading path (`evaluate_checkpoint.load_model`)
+  reconstructed `ResidualSRBicubic` correctly; `run_inference` with both
+  `tta="none"` and `tta="x8"` produced finite, correctly-shaped
+  (128x128 LR -> 256x256 prediction) output.
+- Resume verified: re-ran with `--resume .../checkpoint_latest.pt --epochs 2`;
+  scheduler state restored, training continued from epoch 2 correctly, and a
+  new best checkpoint was saved normally.
+- No historical checkpoint was read or written during this test.
+
+The smoke run's own numbers are **not an experiment result** and must not be
+compared against Experiment 6/9/10/11/12/13/14/15/16.
+
+## Checkpoint Safety
+
+`checkpoints/exp6_crop96/{checkpoint_best,checkpoint_latest}.pt`,
+`checkpoints/exp9_edsr_lite/checkpoint_best.pt`,
+`checkpoints/exp12_nafnet_sr/checkpoint_best.pt`,
+`checkpoints/exp13_swinir_lite/checkpoint_best.pt`,
+`checkpoints/exp14_cosine/checkpoint_best.pt`, and
+`checkpoints/exp15_extended60/{checkpoint_best,checkpoint_latest}.pt` and
+`checkpoints/exp16_extended70/{checkpoint_best,checkpoint_latest}.pt` were
+SHA-256-hashed before and after this preparation task; every hash is
+unchanged.
+
+## Result
+
+**TBD.** No real Experiment 17 training run has been started. The next step
+is a from-scratch screening run:
+
+```bash
+python train.py --model residual_sr_bicubic --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --epochs 40 --checkpoint-dir checkpoints/exp17_bicubic_residual
+```
+
+then compare with `evaluate_checkpoint.py --checkpoint
+checkpoints/exp17_bicubic_residual/checkpoint_best.pt` against Experiment 16
+non-TTA (27.7656 dB / 0.748618) and, if promising, evaluate `--tta x8`
+against the current best overall pipeline (Experiment 16 + x8 TTA,
+27.8154 dB / 0.750571). **This run has not been started.**
 
 ---
 
@@ -2909,17 +3241,24 @@ above, which remains the only quantitative comparison in this log.
 | Exp 7 — Full-image crop  | 96x96 -> 128x128 (full image) LR crop | **27.7101 dB** |      0.743748 | Complete |
 | Exp 8 — MSE loss         | L1 -> MSE, stopped after 15-epoch screen |    27.2159 dB |      0.727473 | Complete |
 | Exp 9 — EDSR-lite arch   | ResidualSRNet -> EDSRLite (64F/16B, 1.37M params) | 27.5658 dB | 0.742162 | Complete |
-| Exp 10 — x8 geometric TTA | Inference-only self-ensemble on Exp 6 checkpoint | **27.7689 dB** | **0.747955** | Complete |
+| Exp 10 — x8 geometric TTA | Inference-only self-ensemble on Exp 6 checkpoint | 27.7689 dB | 0.747955 | Complete (superseded by Exp 16 + x8) |
 | Exp 11 — Model ensemble  | Weighted average of Exp 6 + Exp 9 raw predictions | 27.7561 dB | 0.747603 | Complete (rejected) |
 | Exp 12 — NAFNet-SR arch  | ResidualSRNet -> NAFNet-style gated blocks (64F/8B, 432K params) | 27.2178 dB | 0.729829 | Complete (rejected, stopped @32) |
 | Exp 13 — SwinIR-lite arch | Convolution -> windowed self-attention (embed60/6 blocks, 348K params) | 27.4361 dB | 0.738432 | Complete (rejected) |
 | Exp 14 — Cosine LR schedule | Exp 6 architecture, ReduceLROnPlateau -> CosineAnnealingLR (T_max=40) | 27.6011 dB | 0.742668 | Complete (rejected) |
-| Exp 15 — Extended champion training | Resume Exp 6 latest checkpoint 40 -> 60 epochs, same recipe | TBD | TBD | Planned / prepared |
+| Exp 15 — Extended champion training | Resume Exp 6 latest checkpoint 40 -> 60 epochs, same recipe | 27.7626 dB | 0.748636 | Complete |
+| Exp 16 — Extended champion training | Resume Exp 15 latest checkpoint 60 -> 70 epochs, same recipe | 27.7656 dB | 0.748618 | Complete |
+| Exp 16 + x8 TTA | Inference-only self-ensemble on Exp 16 checkpoint | **27.8154 dB** | **0.750571** | Complete |
+| Exp 17 — Bicubic residual learning | ResidualSR learned branch + fixed bicubic global skip, trained from scratch | TBD | TBD | Planned / prepared |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an
 optional inference-time post-processing step, not a new checkpoint-selection
-candidate; Experiment 6's checkpoint remains the underlying "champion" model.
+candidate. **As of Experiment 16, Experiment 6 is no longer the underlying
+champion model** -- Experiment 16's checkpoint (epoch 65, a continuation of
+Experiment 6 via Experiments 15/16) is, and Experiment 16 + x8 TTA
+(27.8154 dB / 0.750571) is now the best overall pipeline, superseding
+Experiment 6 + x8 TTA (27.7689 dB / 0.747955).
 
 Note: Exp 11 is not a trained model either -- it is Experiment 6 and Experiment 9's
 checkpoints combined at inference time via weighted raw-prediction averaging. Its

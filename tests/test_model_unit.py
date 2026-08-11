@@ -6,6 +6,7 @@ import torch
 from src.models import (
     EDSRLite,
     NAFNetSR,
+    ResidualSRBicubic,
     ResidualSRNet,
     SwinIRLite,
     build_model,
@@ -276,3 +277,41 @@ def test_experiment_13_style_model_config_still_works_through_factory() -> None:
     model = build_model(exp13_config)
     assert isinstance(model, SwinIRLite)
     assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 348_421
+
+
+# --- Experiment 17: bicubic-residual model factory support ---
+
+
+def test_residual_sr_bicubic_config_includes_architecture_identifier() -> None:
+    config = build_model_config("residual_sr_bicubic", num_features=64, num_blocks=8, scale=2)
+    assert config == {
+        "architecture": "residual_sr_bicubic",
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 64,
+        "num_blocks": 8,
+        "scale": 2,
+    }
+
+
+def test_build_model_reconstructs_residual_sr_bicubic() -> None:
+    config = build_model_config("residual_sr_bicubic", num_features=8, num_blocks=2, scale=2)
+    model = build_model(config)
+    assert isinstance(model, ResidualSRBicubic)
+    output = model(torch.randn(1, 1, 16, 16))
+    assert output.shape == (1, 1, 32, 32)
+
+
+def test_experiment_17_style_model_config_still_works_through_factory() -> None:
+    """Experiment 17's exact intended model_config, reconstructed through build_model."""
+    exp17_config = {
+        "architecture": "residual_sr_bicubic",
+        "in_channels": 1,
+        "out_channels": 1,
+        "num_features": 64,
+        "num_blocks": 8,
+        "scale": 2,
+    }
+    model = build_model(exp17_config)
+    assert isinstance(model, ResidualSRBicubic)
+    assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 630_724
