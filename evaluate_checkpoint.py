@@ -24,6 +24,7 @@ from src.dataset_discovery import discover_layout, discover_pairs
 from src.losses import loss_label
 from src.metrics import psnr, ssim
 from src.models import build_model
+from src.noise_conditioning import wrap_for_conditioning
 from src.splits import split_pairs
 from src.tta import predict_x8
 from train import BICUBIC_PSNR_DB, BICUBIC_SSIM, select_device, validate
@@ -85,9 +86,17 @@ def load_model(
     live/raw weights instead, e.g. for diagnostics -- this never changes
     which checkpoint was selected as "best" during training, only which
     weights get loaded from it afterward.
+
+    When the checkpoint has a ``noise_conditioning_config`` (Experiment 25),
+    the reconstructed model is wrapped with ``NoiseConditionedModel`` so
+    callers can keep passing plain single-channel LR tensors -- the [lr, sigma]
+    expansion happens automatically inside the model, identically to how
+    training built it. ``infer_test.py``, ``evaluate_group_aware.py``, and x8
+    TTA all reuse this one function and therefore need no changes of their own.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model = build_model(checkpoint["model_config"]).to(device)
+    base_model = build_model(checkpoint["model_config"]).to(device)
+    model = wrap_for_conditioning(base_model, checkpoint.get("noise_conditioning_config"))
     ema_state_dict = checkpoint.get("ema_state_dict")
     if prefer_ema and ema_state_dict is not None:
         model.load_state_dict(ema_state_dict)

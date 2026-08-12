@@ -3784,10 +3784,11 @@ standalone diagnostic `evaluate_group_aware.py`.
 
 ## Status
 
-**PLANNED / PREPARED.** Implementation, distribution selection, empirical
-match-quality gate, tests, CUDA sanity and a tiny real-data smoke test are all
-complete and passing. **No real training run has been started**
-(`checkpoints/exp24_noise_aug/` does not exist).
+**COMPLETE / REJECTED.** The real training run finished (from scratch, 90
+epochs, `checkpoints/exp24_noise_aug/`). It trails the Experiment 23 champion
+on both canonical and group-aware validation. Do not extend Experiment 24 or
+tune `--synthetic-noise-prob` further; Experiment 25 explores a different
+angle (explicit noise conditioning instead of synthetic substitution).
 
 ## Hypothesis
 
@@ -3941,7 +3942,7 @@ mismatched `--synthetic-noise-prob 0.25` resume correctly rejected.
 
 ## Result
 
-**TBD.** No real Experiment 24 training run has been started. Proposed command:
+**REJECTED — trails the Experiment 23 champion.**
 
 ```bash
 python train.py --model residual_sr --num-features 64 --num-blocks 8 \
@@ -3952,9 +3953,176 @@ python train.py --model residual_sr --num-features 64 --num-blocks 8 \
   --epochs 90 --checkpoint-dir checkpoints/exp24_noise_aug
 ```
 
+| split | PSNR (dB) | SSIM | L1 |
+| --- | ---: | ---: | ---: |
+| canonical, non-TTA | 27.8721 | 0.747690 | 0.032828 |
+| canonical, x8 TTA | 27.9116 | 0.749092 | 0.032667 |
+| group-aware (diagnostic) | 28.1264 | 0.748362 | 0.030632 |
+
+Champion for comparison — Experiment 23 EMA e90 + x8 TTA: **28.0355 dB /
+0.758519 / 0.032264** (canonical, non-TTA 27.9893 / 0.756916 / 0.032443;
+group-aware 28.2333 / 0.758245 / 0.030269).
+
+Experiment 24 trails Experiment 23 on both canonical and group-aware
+validation, on every metric. The synthetic-noise substitution did not improve
+generalization here — plausibly because the augmentation, despite passing the
+Experiment 22 match-quality gate, still introduces a residual synthetic/real
+domain gap that offsets whatever benefit additional noise realizations bring.
+**Do not extend this experiment or tune `--synthetic-noise-prob` further.**
+Experiment 25 tests a different hypothesis: give the model an explicit,
+per-pixel estimate of the measured noise level instead of substituting
+synthetic input.
+
+---
+
+# Experiment 25 — Noise-Conditioned ResidualSR
+
+## Status
+
+**PLANNED / PREPARED.** Implementation, tests, CUDA sanity and a tiny
+real-data smoke test are all complete and passing. **No real training run has
+been started** (`checkpoints/exp25_noise_conditioned/` does not exist).
+
+## Hypothesis
+
+Experiment 24 substituted synthetic degraded inputs to expose the model to
+more noise realizations, but a residual synthetic/real domain gap likely
+offset the benefit (see Experiment 24 result above). Experiment 25 instead
+trains exclusively on real NoisyLR/GT pairs — no synthetic substitution — but
+gives the model an explicit, per-pixel estimate of the measured
+signal-dependent noise level (Experiment 22's model) as a second input
+channel. Providing this as an auxiliary signal, rather than perturbing the
+input distribution, may let the network adapt its restoration strength to the
+local noise level without incurring any synthetic-domain mismatch.
+
+Champion for comparison — Experiment 23 EMA e90 + x8 TTA: **28.0355 dB /
+0.758519 / 0.032264**.
+
+## Noise conditioning
+
+```
+channel 0 = NoisyLR                                   (real, completely unmodified)
+channel 1 = sigma(clamp(NoisyLR, 0, 1))                (Experiment 22's measured model)
+
+I           = clamp(NoisyLR, 0, 1)                     # clamp affects ONLY the sigma estimate
+variance    = clamp(-6.19e-05 + 0.00653*I + 0.0201*I^2, min=0)   # floor 0.0, Exp22 verbatim
+sigma       = sqrt(variance)                           # fed raw -- no normalization
+```
+
+The clamp is isolated to the intensity used for sigma estimation; the LR
+channel that reaches the model is never clamped or otherwise modified. Sigma
+is fed raw, with no arbitrary normalization. Mutually exclusive with
+Experiment 24 — no synthetic noise augmentation is used here.
+
+Implemented once in `src/noise_conditioning.py` (`conditioning_sigma_map`,
+`prepare_model_input`) reusing `src/synthetic_noise.py`'s variance/sigma
+formulas rather than duplicating them, so training, validation, x8 TTA,
+`evaluate_checkpoint.py`, `infer_test.py`, and `evaluate_group_aware.py` all
+compute the identical conditioning map.
+
+## Model
+
+Existing `ResidualSRNet`, unmodified apart from `in_channels=2` (was 1) so
+`conv_in` accepts the extra sigma channel. 64F/8B, scale 2, same residual
+blocks and upsampling head as every other ResidualSR experiment. No
+attention, no additional blocks, no extra width, no denoiser, no synthetic
+augmentation, no weighted/SSIM/Charbonnier/MSE loss, no crop-size or
+scheduler/EMA-decay change. Parameter count: 631,300 (vs 630,724 for the
+single-channel model — the difference is entirely `conv_in`'s extra input
+channel).
+
+## Wrapper design (`NoiseConditionedModel`)
+
+`wrap_for_conditioning` wraps the base model in a thin `nn.Module` whose
+`forward` computes `prepare_model_input(lr, config)` before delegating to the
+base model. Standard `nn.Module` composition means `.parameters()`,
+`.to(device)`, `.train()`/`.eval()`, and `copy.deepcopy` (used by
+`ExponentialMovingAverage`) all transparently pass through — so `src/tta.py`,
+`train.train_one_epoch`/`validate`, `evaluate_checkpoint.validate_x8`,
+`infer_test.run_inference`, and `evaluate_group_aware.py` needed **zero**
+changes; every caller keeps passing plain single-channel LR tensors. When
+conditioning is disabled, `wrap_for_conditioning` returns the exact same model
+object (no wrapper at all), so historical commands are byte-for-byte
+unaffected.
+
+## x8 TTA spatial consistency
+
+Since sigma is an exactly pointwise function of LR, "transform LR then
+compute sigma" (what the wrapper does automatically inside `predict_x8`) and
+"compute sigma then transform both channels together" are mathematically
+identical. Verified numerically:
+`test_x8_conditioning_matches_concatenate_then_transform` compares the two
+orderings and confirms `torch.allclose(..., atol=1e-6)` with max difference
+`0.0`.
+
+## Checkpoint / resume
+
+`noise_conditioning_config` is stored in every checkpoint:
+`{enabled, method: "signal_dependent_sigma", variance_coefficients, input_intensity_clamp: [0.0, 1.0], variance_floor: 0.0, sigma_normalization: "none"}`,
+or `None` when disabled (mirrors `ema_config`/`synthetic_noise_config`).
+`evaluate_checkpoint.load_model` reconstructs the wrapped model automatically
+from this key, so `infer_test.py` and `evaluate_group_aware.py` need no
+changes of their own. Resume uses the same `_UNSET`-sentinel strict-match
+pattern as `ema_config`/`synthetic_noise_config`: matching config resumes;
+different coefficients, floor, or method is rejected; a conditioned checkpoint
+resumed with conditioning disabled (or vice versa) is rejected; historical
+checkpoints (which lack the key entirely) resume unchanged.
+
+## Tests
+
+35 new tests in `tests/test_noise_conditioning_unit.py` covering the variance
+formula, clamp isolation, LR-channel preservation, variance non-negativity,
+sigma finiteness/monotonicity, tensor shapes and channel content, the
+disabled/historical passthrough, `ResidualSRNet` with `in_channels=2`,
+training forward/backward, EMA compatibility, validation, x8 TTA equivalence,
+`evaluate_checkpoint`/`infer_test`/`evaluate_group_aware` integration,
+checkpoint config correctness, and matching/mismatched/historical resume. Full
+fast suite: **560 passed, 8 deselected** (up from 525).
+
+## CUDA sanity
+
+ResidualSRNet 64F/8B, `in_channels=2`, batch16, crop96 (LR 48x48, GT
+96x96), L1, EMA 0.999: finite forward (`631,300` trainable params, output
+shape `(16,1,96,96)`), finite loss/gradients, EMA update succeeded, no OOM.
+Allocated 13.3 MiB (peak 211.8 MiB), reserved 270.0 MiB (peak 270.0 MiB).
+
+## Real-data smoke test
+
+```bash
+python train.py --checkpoint-dir checkpoints/exp25_noise_conditioned_smoke \
+  --max-train-samples 32 --max-val-samples 16 --epochs 2 --batch-size 8 \
+  --crop-size 96 --num-features 64 --num-blocks 8 --loss l1 \
+  --ema --ema-decay 0.999 --noise-conditioning --seed 42
+```
+
+Verified then deleted: only real NoisyLR/GT used (no synthetic augmentation),
+the conditioning map generated correctly, EMA-driven validation, correct
+`noise_conditioning_config` stored in the checkpoint,
+`evaluate_checkpoint.py` working with `--tta none` and `--tta x8`,
+`evaluate_group_aware.py` running end-to-end, `infer_test.py` producing
+finite x8 predictions, a matching resume succeeding (EMA state restored,
+continuing at epoch 3), and a mismatched resume (conditioning disabled)
+correctly rejected. Historical checkpoint hashes
+(`exp19_ema`, `exp20_ema_extended70`, `exp21_ema_extended80`,
+`exp23_ema_extended90`, `exp24_noise_aug`, `exp6_crop96`) confirmed identical
+before and after this preparation.
+
+## Result
+
+**TBD.** No real Experiment 25 training run has been started. Proposed
+command:
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 --noise-conditioning \
+  --epochs 90 --checkpoint-dir checkpoints/exp25_noise_conditioned
+```
+
 Then compare with `evaluate_checkpoint.py --checkpoint
-checkpoints/exp24_noise_aug/checkpoint_best.pt --tta x8` against the protected
-champion (28.0355 dB / 0.758519 / 0.032264).
+checkpoints/exp25_noise_conditioned/checkpoint_best.pt --tta x8` against the
+protected champion (Experiment 23, 28.0355 dB / 0.758519 / 0.032264).
 
 ---
 

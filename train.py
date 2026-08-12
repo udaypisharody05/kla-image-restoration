@@ -24,6 +24,13 @@ Default is off, reproducing every prior experiment's behavior exactly.
 ``--synthetic-noise-prob`` (default ``0.0``, off) mixes in extra *training*
 inputs synthesized from GT via the Experiment 22 signal-dependent degradation
 model (see ``src/synthetic_noise.py``). Validation always stays 100% real.
+
+``--noise-conditioning`` (default off) instead trains exclusively on real
+NoisyLR/GT pairs, but gives the model an explicit second input channel: a
+per-pixel estimate of the same Experiment 22 noise model's sigma, computed
+from the real LR itself (see ``src/noise_conditioning.py``). Mutually
+independent of ``--synthetic-noise-prob`` -- Experiment 25 uses this instead
+of, not alongside, Experiment 24's augmentation.
 """
 
 import argparse
@@ -42,6 +49,7 @@ from src.ema import ExponentialMovingAverage
 from src.losses import build_loss, build_loss_config, loss_label
 from src.metrics import psnr, ssim
 from src.models import build_model, build_model_config
+from src.noise_conditioning import build_noise_conditioning_config, wrap_for_conditioning
 from src.splits import split_pairs
 from src.synthetic_noise import (
     DISTRIBUTIONS,
@@ -228,6 +236,7 @@ def save_checkpoint(
     ema: ExponentialMovingAverage | None = None,
     ema_config: dict | None = None,
     synthetic_noise_config: dict | None = None,
+    noise_conditioning_config: dict | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -256,6 +265,10 @@ def save_checkpoint(
             # variance coefficients, floor, downsampling, seed) -- see
             # SyntheticNoiseAugmentation.config(). None means "not used".
             "synthetic_noise_config": synthetic_noise_config,
+            # Fully reconstructs the [lr, sigma] input-preparation step -- see
+            # NoiseConditionedModel / build_noise_conditioning_config. None
+            # means the model takes plain single-channel LR, as historically.
+            "noise_conditioning_config": noise_conditioning_config,
         },
         path,
     )
@@ -276,6 +289,7 @@ def load_checkpoint_for_resume(
     ema: ExponentialMovingAverage | None = None,
     ema_config: dict | None = _UNSET,
     synthetic_noise_config: dict | None = _UNSET,
+    noise_conditioning_config: dict | None = _UNSET,
 ) -> tuple[int, float, dict]:
     """Restore model/optimizer/(optional) scheduler/(optional) EMA state from *path*.
 
@@ -361,6 +375,20 @@ def load_checkpoint_for_resume(
                 f"match the requested synthetic_noise_config {synthetic_noise_config}; pass "
                 "matching --synthetic-noise-prob/--synthetic-noise-distribution/"
                 "--synthetic-noise-nu/--synthetic-noise-variance-floor to resume."
+            )
+    if noise_conditioning_config is not _UNSET:
+        # Same _UNSET-sentinel rationale as ema_config/synthetic_noise_config:
+        # None is conditioning's own legitimate "disabled" value. Changing
+        # whether/how the model's input is conditioned mid-run would silently
+        # feed it a differently-shaped or differently-computed input than what
+        # produced its saved weights, so every difference is rejected.
+        checkpoint_noise_conditioning_config = checkpoint.get("noise_conditioning_config")
+        if checkpoint_noise_conditioning_config != noise_conditioning_config:
+            raise ValueError(
+                f"Checkpoint noise_conditioning_config {checkpoint_noise_conditioning_config} "
+                f"does not match the requested noise_conditioning_config "
+                f"{noise_conditioning_config}; pass matching "
+                "--noise-conditioning/--noise-conditioning-variance-floor to resume."
             )
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -625,6 +653,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--noise-conditioning",
+        action="store_true",
+        help=(
+            "Give the model a second input channel: a per-pixel Experiment 22 "
+            "signal-dependent sigma estimate computed from the real NoisyLR. Sets "
+            "model in_channels=2. Trains exclusively on real data -- independent of "
+            "--synthetic-noise-prob. Default: off (single-channel LR, as historically)."
+        ),
+    )
+    parser.add_argument(
+        "--noise-conditioning-variance-floor",
+        type=float,
+        default=0.0,
+        help=(
+            "Lower bound on the conditioning sigma's variance (ignored unless "
+            "--noise-conditioning). 0.0 (default) is the Experiment 22 model verbatim."
+        ),
+    )
+    parser.add_argument(
         "--loss",
         type=str,
         choices=["l1", "mse", "charbonnier", "l1_ssim"],
@@ -745,9 +792,14 @@ def main() -> None:
         num_workers=args.num_workers,
     )
 
+    noise_conditioning_config = build_noise_conditioning_config(
+        args.noise_conditioning, variance_floor=args.noise_conditioning_variance_floor
+    )
+    # in_channels=2 only because conv_in must accept the extra sigma channel --
+    # every other architectural detail (blocks, upsampling head) is untouched.
     model_config = build_model_config(
         args.model,
-        in_channels=1,
+        in_channels=2 if noise_conditioning_config else 1,
         out_channels=1,
         num_features=args.num_features,
         num_blocks=args.num_blocks,
@@ -759,10 +811,15 @@ def main() -> None:
         window_size=args.window_size,
         mlp_ratio=args.mlp_ratio,
     )
-    model = build_model(model_config).to(device)
+    base_model = build_model(model_config).to(device)
+    # wrap_for_conditioning returns base_model itself (no wrapper at all) when
+    # conditioning is off, so every historical command's model object is
+    # byte-for-byte the same as before this feature existed.
+    model = wrap_for_conditioning(base_model, noise_conditioning_config)
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {args.model} ({param_count:,} trainable parameters)")
     print(f"Model config: {model_config}")
+    print(f"Noise conditioning: {noise_conditioning_config or 'disabled'}")
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     loss_config = build_loss_config(args.loss, args.charbonnier_eps, args.ssim_weight)
@@ -819,6 +876,7 @@ def main() -> None:
             ema=ema,
             ema_config=ema_config,
             synthetic_noise_config=synthetic_noise_config,
+            noise_conditioning_config=noise_conditioning_config,
         )
         print(
             f"Resumed from {args.resume}: continuing at epoch {start_epoch} "
@@ -901,6 +959,7 @@ def main() -> None:
             ema=ema,
             ema_config=ema_config,
             synthetic_noise_config=synthetic_noise_config,
+            noise_conditioning_config=noise_conditioning_config,
         )
         if is_new_best:
             save_checkpoint(
@@ -917,6 +976,7 @@ def main() -> None:
                 ema=ema,
                 ema_config=ema_config,
                 synthetic_noise_config=synthetic_noise_config,
+                noise_conditioning_config=noise_conditioning_config,
             )
             print(f"New best checkpoint saved ({best_path}); Val PSNR={best_val_psnr:.4f} dB")
 

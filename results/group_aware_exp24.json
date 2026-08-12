@@ -1,0 +1,28 @@
+{
+  "checkpoint": "checkpoints\\exp24_noise_aug\\checkpoint_best.pt",
+  "epoch": 90,
+  "tta": "none",
+  "note": "Group-aware metric is DIAGNOSTIC ONLY; canonical remains authoritative.",
+  "scene_groups": 119,
+  "canonical": {
+    "count": 640,
+    "loss": 0.032828314462676644,
+    "psnr": 27.872059058866807,
+    "ssim": 0.7476899859690568,
+    "groups_spanning_split": 36,
+    "validation_images_with_train_twin": 38
+  },
+  "group_aware": {
+    "count": 640,
+    "loss": 0.030631897551938892,
+    "psnr": 28.126398363951477,
+    "ssim": 0.7483618547551674,
+    "groups_spanning_split": 0,
+    "validation_images_with_train_twin": 0
+  },
+  "delta": {
+    "loss": -0.0021964169107377522,
+    "psnr": 0.2543393050846703,
+    "ssim": 0.0006718687861105854
+  }
+}

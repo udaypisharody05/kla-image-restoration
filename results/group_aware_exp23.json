@@ -1,0 +1,28 @@
+{
+  "checkpoint": "checkpoints\\exp23_ema_extended90\\checkpoint_best.pt",
+  "epoch": 90,
+  "tta": "none",
+  "note": "Group-aware metric is DIAGNOSTIC ONLY; canonical remains authoritative.",
+  "scene_groups": 119,
+  "canonical": {
+    "count": 640,
+    "loss": 0.032443292904645205,
+    "psnr": 27.989320904981987,
+    "ssim": 0.7569159791080466,
+    "groups_spanning_split": 36,
+    "validation_images_with_train_twin": 38
+  },
+  "group_aware": {
+    "count": 640,
+    "loss": 0.030269253812730313,
+    "psnr": 28.233265608494413,
+    "ssim": 0.7582449745224902,
+    "groups_spanning_split": 0,
+    "validation_images_with_train_twin": 0
+  },
+  "delta": {
+    "loss": -0.0021740390919148915,
+    "psnr": 0.24394470351242603,
+    "ssim": 0.0013289954144435345
+  }
+}

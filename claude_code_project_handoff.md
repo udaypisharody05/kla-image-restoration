@@ -440,7 +440,7 @@ per-image difficulty dominates the comparison. The group-aware metric is only
 meaningful compared against itself across experiments; canonical stays
 authoritative.
 
-### Experiment 24 (prepared, not yet run — signal-dependent synthetic noise)
+### Experiment 24 (completed — REJECTED; signal-dependent synthetic noise)
 
 Adds synthetic noisy-LR training inputs drawn from the Experiment 22
 degradation model (`src/synthetic_noise.py`), as its MEDIUM-HIGH recommendation.
@@ -471,14 +471,58 @@ Key decisions, all evidence-backed by `analyze_synthetic_noise.py`
   index]))` — no global RNG, worker-count independent, fresh realization each
   epoch via `train_dataset.set_epoch(epoch)`.
 
-**Next step: the real run** (not started; `checkpoints/exp24_noise_aug/` does not
-exist):
+**Real run result (`checkpoints/exp24_noise_aug/`, 90 epochs, from scratch):**
+
+| split | PSNR (dB) | SSIM | L1 |
+| --- | ---: | ---: | ---: |
+| canonical, non-TTA | 27.8721 | 0.747690 | 0.032828 |
+| canonical, x8 TTA | 27.9116 | 0.749092 | 0.032667 |
+| group-aware (diagnostic) | 28.1264 | 0.748362 | 0.030632 |
+
+Trails the Experiment 23 champion (28.0355 / 0.758519 / 0.032264) on every
+metric, canonical and group-aware alike. **Rejected — do not extend this
+experiment or tune `--synthetic-noise-prob` further.** Experiment 25 (below)
+tests a different hypothesis instead.
+
+### Experiment 25 (prepared, not yet run — noise-conditioned ResidualSR)
+
+Instead of substituting synthetic inputs (Experiment 24's rejected approach),
+gives the model an explicit second input channel: a per-pixel
+signal-dependent sigma estimate from the same Experiment 22 model, computed
+from the real NoisyLR itself. Trains exclusively on real NoisyLR/GT pairs —
+mutually exclusive with `--synthetic-noise-prob`.
+
+```
+channel 0 = NoisyLR                        (real, never clamped)
+channel 1 = sigma(clamp(NoisyLR, 0, 1))     (Experiment 22 model, raw sigma, no normalization)
+```
+
+`ResidualSRNet` is unchanged apart from `in_channels=2` (631,300 params vs
+630,724). New module `src/noise_conditioning.py` provides
+`conditioning_sigma_map`/`prepare_model_input` (reusing
+`src/synthetic_noise.py`'s variance/sigma formulas) plus a
+`NoiseConditionedModel` wrapper whose standard `nn.Module` composition makes
+`--noise-conditioning` work transparently through EMA, x8 TTA,
+`evaluate_checkpoint.py`, `infer_test.py`, and `evaluate_group_aware.py` with
+**zero changes to any of those files**. x8 TTA spatial consistency (sigma
+computed after each D4 transform vs. concatenate-then-transform) verified
+numerically identical (`torch.allclose(..., atol=1e-6)`, max diff `0.0`).
+
+35 new tests, full fast suite 560 passed / 8 deselected. CUDA sanity (64F/8B,
+`in_channels=2`, batch16, crop96, EMA 0.999): finite forward/backward, EMA
+update, peak 211.8 MiB allocated, no OOM. Real-data smoke test (32
+train/16 val, 2 epochs, `checkpoints/exp25_noise_conditioned_smoke`, deleted
+after): real-only data confirmed, EMA/resume/mismatch-rejection all verified,
+`evaluate_checkpoint.py`/`infer_test.py`/`evaluate_group_aware.py` all working
+with the conditioned checkpoint. See EXPERIMENT_LOG.md for full detail.
+
+**Next step: the real run** (not started; `checkpoints/exp25_noise_conditioned/`
+does not exist):
 
 ```bash
 python train.py --model residual_sr --num-features 64 --num-blocks 8 \
   --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
   --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
-  --ema --ema-decay 0.999 \
-  --synthetic-noise-prob 0.5 --synthetic-noise-distribution gaussian \
-  --epochs 90 --checkpoint-dir checkpoints/exp24_noise_aug
+  --ema --ema-decay 0.999 --noise-conditioning \
+  --epochs 90 --checkpoint-dir checkpoints/exp25_noise_conditioned
 ```
