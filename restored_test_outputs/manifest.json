@@ -1,0 +1,31 @@
+{
+  "generated_at": "2026-08-16T16:11:36.147736+00:00",
+  "input_dir": "data\\Data-public\\Test_NoisyLR\\NoisyLR",
+  "output_dir": "restored_test_outputs",
+  "num_inputs": 400,
+  "num_outputs": 400,
+  "num_validated_pairs": 400,
+  "num_missing": 0,
+  "num_extra": 0,
+  "output_format": ".npy, float32, grayscale [H,W]",
+  "output_dtypes_seen": [
+    "float32"
+  ],
+  "output_shapes_seen": [
+    [
+      256,
+      256
+    ]
+  ],
+  "value_range_overall": [
+    -0.19601839780807495,
+    1.3000675439834595
+  ],
+  "all_finite": true,
+  "scale_factor": 2,
+  "model": "residual_sr (weights/residualsr_final_ema.pt)",
+  "tta": "none",
+  "no_ground_truth_included": true,
+  "problems": [],
+  "status": "PASS"
+}

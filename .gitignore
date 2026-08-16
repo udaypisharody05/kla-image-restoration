@@ -45,8 +45,6 @@ results/test_sanity_exp6/
 results/test_exp20_x8/
 results/test_sanity_exp20/
 
-# Generated inference outputs
-restored_test_outputs/
 
 # Local submission workflow files
 SUBMISSION_CHECKLIST.md

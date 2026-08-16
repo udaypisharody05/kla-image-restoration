@@ -323,12 +323,11 @@ Produces 400 `.npy` outputs (one per official test input) plus
 available ground truth, so no PSNR/SSIM/LPIPS is computed for it — see
 `manifest.json`'s validation fields (shape/dtype/finiteness/count) instead.
 
-`restored_test_outputs/` is ~102 MiB total (400 files x ~256 KiB) of
-**generated output** and is therefore intentionally excluded from Git via
-`.gitignore` — it is not tracked in this repository and will not exist after
-a fresh clone. Reproduce it at any time from the tracked final weights
-(`weights/residualsr_final_ema.pt`) with the two commands above; on the
-development GPU this takes under 10 seconds.
+`restored_test_outputs/` contains the final restored outputs for all 400 official
+test images plus `manifest.json`, as required for hackathon submission.
+
+These outputs were generated using the tracked final model weights at
+`weights/residualsr_final_ema.pt`. The directory is approximately 102 MiB in total.
 
 ## Reproducibility
 
