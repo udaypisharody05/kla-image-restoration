@@ -14,9 +14,15 @@ RUN groupadd --gid 10001 app \
     && mkdir -p /app/data /app/results \
     && chown -R app:app /app
 
-COPY --chown=app:app inspect_dataset.py visualize_samples.py evaluate_baseline.py pytest.ini ./
+# All root-level scripts (train.py, inference.py, evaluate_checkpoint.py,
+# benchmark_inference.py, export_final_weights.py, etc.) plus the library
+# code, test suite, and the small tracked final-weights artifact. Excludes
+# the dataset, .venv, checkpoints/, and restored_test_outputs/ via
+# .dockerignore.
+COPY --chown=app:app *.py pytest.ini ./
 COPY --chown=app:app src/ ./src/
 COPY --chown=app:app tests/ ./tests/
+COPY --chown=app:app weights/ ./weights/
 
 USER app
 

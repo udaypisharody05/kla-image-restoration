@@ -19,11 +19,19 @@ __MACOSX/
 data/
 results/
 checkpoints/
+restored_test_outputs/
 runs/
 wandb/
 *.pt
 *.pth
 *.ckpt
+
+# Submission-required inference-only weight artifact: exempt from the blanket
+# *.pt rule above (intended for bulky training checkpoints, not the small
+# packaged file the image needs for standalone inference). Mirrors .gitignore.
+!weights/
+!weights/*.pt
+
 *.zip
 *.tar
 *.tar.gz

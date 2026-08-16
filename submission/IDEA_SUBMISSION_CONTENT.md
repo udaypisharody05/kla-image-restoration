@@ -4,11 +4,11 @@
 
 This file contains exact, ready-to-paste content for Slides 1–9 of the
 official Hackathon Idea Submission Template (`TeamName_KLA_PS01.pptx`). No
-official `.pptx` template file was found in this repository at the time of
-writing, so this Markdown is the primary deliverable; a draft `.pptx` is
-also provided (see `submission/README.md` if present, or the repository
-root) built from this exact content and clearly labeled as a **draft**, not
-the official template.
+official `.pptx` template file, and no draft `.pptx` built from it, is
+tracked in this repository (both the local draft-generation script and any
+`.pptx` it produces are intentionally excluded from Git — see
+`.gitignore`). This Markdown file is therefore the primary, tracked
+deliverable for the idea-submission content.
 
 Every number below is measured and reproducible from this repository (see
 `results/final_metrics.json`, `results/final_benchmark.json`,
@@ -20,13 +20,16 @@ unless it was actually run and scored.
 
 ## Slide 1 — Team Details
 
-> **The following fields could not be determined from repository contents
-> and must be filled in manually — see Section L of the audit report.**
+> **Mandatory template fields below are not present anywhere in this
+> repository and must be filled in by the team before submission.**
 
-- **Team name**: `[PLACEHOLDER — TEAM NAME NOT FOUND IN REPOSITORY]`
-- **Members / roles**: `[PLACEHOLDER — NAMES AND ROLES NOT FOUND IN REPOSITORY]`
-- **College name**: `[PLACEHOLDER — INSTITUTION NOT FOUND IN REPOSITORY]`
-- **Contact details** (email/phone): `[PLACEHOLDER — CONTACT INFO NOT FOUND IN REPOSITORY]`
+- **Team name**: `[Superconductor Semistars]`
+- **Members / roles**:
+`[Rohan Muthu (23BCE2243) — Data Processing & Degradation Analysis]`
+`[Uday Pisharody (23BCE2165) — Model Development, Training & System Integration]`
+`[Farwah Shajahan (23BEC0452) — Model Evaluation, Optimization & Experimentation]`
+- **College name**: `[Vellore Institute of Technology (VIT), Vellore]`
+- **Contact details** `(email/phone): [udaypisharody@gmail.com / +91 96067 60360]`
 
 ---
 
@@ -278,7 +281,7 @@ not predicted or claimed here.
 ## Slide 8 — GitHub & Video Link
 
 - **GitHub repository**: https://github.com/udaypisharody05/kla-image-restoration
-- **Video URL**: `[PLACEHOLDER — NOT PROVIDED]` (optional per the template; no video link exists in this repository)
+- **Video URL**: Not provided (optional per the template).
 
 ---
 

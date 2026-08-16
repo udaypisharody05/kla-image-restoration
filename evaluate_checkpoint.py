@@ -1,9 +1,13 @@
 """Evaluate a saved neural restoration checkpoint on the fixed validation split.
 
-Loads a checkpoint saved by ``train.py``, reconstructs the matching
-``ResidualSRNet``, evaluates the deterministic validation split, and prints
-L1/PSNR/SSIM alongside the established bicubic baseline for comparison. Does
-not run inference on the competition test set.
+Loads either a full ``train.py`` training checkpoint (e.g.
+``checkpoints/<exp>/checkpoint_best.pt`` -- includes optimizer/EMA/scheduler
+state, not tracked in Git) or an exported inference-only weights package
+(``export_final_weights.py`` output, e.g. ``weights/residualsr_final_ema.pt``
+-- the tracked public artifact), reconstructs the matching model, evaluates
+the deterministic validation split, and prints L1/PSNR/SSIM alongside the
+established bicubic baseline for comparison. Does not run inference on the
+competition test set.
 
 Regardless of which reconstruction loss a checkpoint was *trained* with (see
 ``src/losses.py`` and ``--loss`` in ``train.py``), evaluation always reports
@@ -18,6 +22,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from inference import _model_config_from_package
 from inspect_dataset import configured_data_dir
 from src.baseline import LPIPSMetric, LPIPSUnavailableError
 from src.dataset import PairedRestorationDataset, create_dataloader
@@ -97,36 +102,13 @@ def compute_lpips(
     return total_lpips / total_count
 
 
-def load_model(
-    checkpoint_path: Path, device: torch.device, prefer_ema: bool = True
+def _load_full_checkpoint(
+    checkpoint: dict, device: torch.device, prefer_ema: bool
 ) -> tuple[nn.Module, dict]:
-    """Reconstruct the model described by a checkpoint's ``model_config``.
-
-    ``build_model()`` reads ``model_config["architecture"]`` (missing ->
-    ResidualSRNet, the only interpretation every Experiment 1-8 checkpoint
-    ever used), so this one call reconstructs every architecture -- infer_test.py
-    reuses this same function and needs no changes either.
-
-    When the checkpoint has EMA state (``ema_state_dict``, saved by an
-    Experiment 19-style ``--ema`` run) and *prefer_ema* is true (the default),
-    those EMA weights are loaded instead of the live/raw ``model_state_dict``
-    -- the EMA weights are what validation actually scored to produce the
-    checkpoint's recorded PSNR, so this is what "the checkpoint" should mean
-    for evaluation/inference by default. Historical and non-EMA checkpoints
-    have no ``ema_state_dict`` (``None``), so they fall through to the exact
-    prior behavior unchanged. Pass ``prefer_ema=False`` to force loading the
-    live/raw weights instead, e.g. for diagnostics -- this never changes
-    which checkpoint was selected as "best" during training, only which
-    weights get loaded from it afterward.
-
-    When the checkpoint has a ``noise_conditioning_config`` (Experiment 25),
-    the reconstructed model is wrapped with ``NoiseConditionedModel`` so
-    callers can keep passing plain single-channel LR tensors -- the [lr, sigma]
-    expansion happens automatically inside the model, identically to how
-    training built it. ``infer_test.py``, ``evaluate_group_aware.py``, and x8
-    TTA all reuse this one function and therefore need no changes of their own.
-    """
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    """Reconstruct the model described by a full ``train.py`` checkpoint's
+    ``model_config`` (see ``load_model`` for the EMA/raw-weights selection
+    and noise-conditioning wrapping this shares with the exported-package
+    path below)."""
     base_model = build_model(checkpoint["model_config"]).to(device)
     model = wrap_for_conditioning(base_model, checkpoint.get("noise_conditioning_config"))
     ema_state_dict = checkpoint.get("ema_state_dict")
@@ -138,9 +120,116 @@ def load_model(
     return model, checkpoint
 
 
+def _load_exported_package(package: dict, device: torch.device) -> tuple[nn.Module, dict]:
+    """Reconstruct the model described by an ``export_final_weights.py``
+    package (e.g. ``weights/residualsr_final_ema.pt``) -- the tracked, public
+    artifact a fresh clone actually has, unlike ``checkpoints/`` which is
+    gitignored.
+
+    Reuses ``inference.py``'s ``_model_config_from_package`` (the same
+    architecture-metadata extraction ``inference.py`` uses to load this file
+    for standalone restoration) rather than a second, potentially-diverging
+    reconstruction of the same config -- one interpretation of the package
+    format, not two. The package stores exactly one weight set (labelled by
+    ``weights_type``, ``"ema"`` for the submitted champion), so unlike a full
+    training checkpoint there is no separate raw-vs-EMA choice to make here.
+
+    Returns a ``checkpoint``-shaped dict carrying a synthesized
+    ``model_config`` (plus ``epoch``/``best_val_psnr``/``loss_config``/
+    ``ema_state_dict`` derived from the package's own fields) so every
+    existing caller of ``load_model`` -- this module's ``main()``,
+    ``evaluate_ensemble.py``, ``evaluate_group_aware.py``, ``infer_test.py``
+    -- keeps working against exported packages with no changes of their own.
+    """
+    model_config = _model_config_from_package(package)
+    base_model = build_model(model_config).to(device)
+    model = wrap_for_conditioning(base_model, package.get("noise_conditioning_config"))
+    model.load_state_dict(package["model_state_dict"])
+    model.eval()
+
+    normalized = dict(package)
+    normalized["model_config"] = model_config
+    normalized["epoch"] = package.get("source_epoch")
+    normalized["best_val_psnr"] = package.get("source_best_val_psnr")
+    normalized.setdefault("loss_config", {"name": "l1"})
+    normalized["ema_state_dict"] = (
+        package["model_state_dict"] if package.get("weights_type") == "ema" else None
+    )
+    normalized["source_format"] = "exported_package"
+    return model, normalized
+
+
+def load_model(
+    checkpoint_path: Path, device: torch.device, prefer_ema: bool = True
+) -> tuple[nn.Module, dict]:
+    """Reconstruct the model described by *checkpoint_path*, whichever of the
+    two supported file shapes it is:
+
+    - a full ``train.py`` training checkpoint (has a ``model_config`` key,
+      e.g. ``checkpoints/exp23_ema_extended90/checkpoint_best.pt`` --
+      gitignored, present only where training was actually run), or
+    - an exported inference-only weights package (has a ``model_state_dict``
+      key but no ``model_config``, e.g.
+      ``weights/residualsr_final_ema.pt`` -- the tracked public artifact a
+      fresh clone actually has).
+
+    ``build_model()`` reads ``model_config["architecture"]`` (missing ->
+    ResidualSRNet, the only interpretation every Experiment 1-8 checkpoint
+    ever used), so this one call reconstructs every architecture -- infer_test.py
+    reuses this same function and needs no changes either.
+
+    When a full checkpoint has EMA state (``ema_state_dict``, saved by an
+    Experiment 19-style ``--ema`` run) and *prefer_ema* is true (the default),
+    those EMA weights are loaded instead of the live/raw ``model_state_dict``
+    -- the EMA weights are what validation actually scored to produce the
+    checkpoint's recorded PSNR, so this is what "the checkpoint" should mean
+    for evaluation/inference by default. Historical and non-EMA checkpoints
+    have no ``ema_state_dict`` (``None``), so they fall through to the exact
+    prior behavior unchanged. Pass ``prefer_ema=False`` to force loading the
+    live/raw weights instead, e.g. for diagnostics -- this never changes
+    which checkpoint was selected as "best" during training, only which
+    weights get loaded from it afterward. An exported package stores only one
+    weight set, so *prefer_ema* has no effect on that path (see
+    ``_load_exported_package``).
+
+    When the checkpoint/package has a ``noise_conditioning_config``
+    (Experiment 25), the reconstructed model is wrapped with
+    ``NoiseConditionedModel`` so callers can keep passing plain
+    single-channel LR tensors -- the [lr, sigma] expansion happens
+    automatically inside the model, identically to how training built it.
+    ``infer_test.py``, ``evaluate_group_aware.py``, and x8 TTA all reuse this
+    one function and therefore need no changes of their own.
+
+    Raises ``ValueError`` (not a bare ``KeyError``) for a file that is
+    neither shape.
+    """
+    raw = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if "model_config" in raw:
+        return _load_full_checkpoint(raw, device, prefer_ema)
+    if "model_state_dict" in raw:
+        return _load_exported_package(raw, device)
+    raise ValueError(
+        f"{checkpoint_path} is neither a full train.py training checkpoint "
+        "(missing 'model_config') nor an exported inference weights package from "
+        "export_final_weights.py (missing 'model_state_dict') -- cannot reconstruct "
+        "a model from it."
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        required=True,
+        help=(
+            "Either a full train.py training checkpoint (e.g. "
+            "checkpoints/<exp>/checkpoint_best.pt -- gitignored, present only where "
+            "training was run) or an exported inference weights package from "
+            "export_final_weights.py (e.g. weights/residualsr_final_ema.pt -- the "
+            "tracked public artifact). Both reconstruct the model automatically."
+        ),
+    )
     parser.add_argument("--data-dir", type=Path, default=configured_data_dir())
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
@@ -183,7 +272,16 @@ def main() -> None:
 
     model, checkpoint = load_model(args.checkpoint, device, prefer_ema=not args.raw_weights)
     has_ema = checkpoint.get("ema_state_dict") is not None
-    if has_ema:
+    is_exported_package = checkpoint.get("source_format") == "exported_package"
+    if is_exported_package:
+        weights_used = f"{checkpoint.get('weights_type', 'unknown')} (exported package -- only one weight set is packaged)"
+        if args.raw_weights and has_ema:
+            print(
+                "Note: --raw-weights requested, but the exported weights package only "
+                "contains EMA weights (no separate raw/live weights are packaged) -- "
+                "evaluating the packaged EMA weights."
+            )
+    elif has_ema:
         weights_used = "raw/live" if args.raw_weights else "EMA"
     else:
         weights_used = "raw/live (checkpoint has no EMA weights)"

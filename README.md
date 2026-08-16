@@ -18,14 +18,53 @@ Images** problem statement.
   64 feature channels, **630,724 trainable parameters**, trained with EMA
   weight averaging (decay 0.999).
 - **Final champion**: `checkpoints/exp23_ema_extended90/checkpoint_best.pt`
-  (EMA weights), packaged for inference as
+  (EMA weights), packaged for inference as the tracked public artifact
   [`weights/residualsr_final_ema.pt`](weights/residualsr_final_ema.pt). See
   [EXPERIMENT_LOG.md](EXPERIMENT_LOG.md) for the full ablation history that
   led to this configuration.
+- **Alternatives tested, not adopted**: an EDSR-lite (1.37M params), a
+  NAFNet-SR-style gated architecture (432K params), and a SwinIR-lite
+  windowed-attention transformer (348K params) were all trained and measured
+  under matched conditions and **all underperformed** the smaller
+  ResidualSR champion (by -0.15 dB, -0.49 dB, and -0.27 dB PSNR respectively)
+  — see EXPERIMENT_LOG.md Experiments 9/12/13. Several other components
+  (channel attention, RDB blocks, noise conditioning, variance-weighted
+  loss, hard-patch sampling) are implemented and unit-tested but were never
+  trained to completion, so they are **not** part of the submitted result —
+  see [`submission/IDEA_SUBMISSION_CONTENT.md`](submission/IDEA_SUBMISSION_CONTENT.md)
+  Slide 5 for the full implemented-vs-benchmarked breakdown.
 - **Measured validation results** (640-sample canonical split, seed 42; see
   [Final metrics](#final-metrics)): **27.9893 dB PSNR / 0.756916 SSIM**
   (raw), **28.0355 dB PSNR / 0.758519 SSIM** (+x8 TTA), vs. a **23.1413 dB /
   0.550604** bicubic baseline.
+
+## Quick Start
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Place the hackathon-provided dataset at `data/Data-public/` (expected
+layout: `data/Data-public/train/train/{NoisyLR,GT}` for the 3,200 training
+pairs, `data/Data-public/Test_NoisyLR/NoisyLR` for the 400 official test
+inputs — see [`docs/dataset_notes.md`](docs/dataset_notes.md)). The dataset
+itself is not part of this repository.
+
+Then restore the official test set using the tracked final weights
+(`weights/residualsr_final_ema.pt`, loaded automatically — no path needs to
+be supplied):
+
+```bash
+python inference.py --input-dir data/Data-public/Test_NoisyLR/NoisyLR --output-dir restored_test_outputs
+```
+
+See [Installation](#installation) below for the full CPU/CUDA install
+matrix, [Standalone inference](#standalone-inference) for all inference
+flags, and [Validation / evaluation](#validation--evaluation) to reproduce
+the PSNR/SSIM/LPIPS numbers in [Final metrics](#final-metrics) against the
+same tracked weights.
 
 ## Repository structure
 
@@ -40,12 +79,14 @@ export_final_weights.py        Re-exports weights/residualsr_final_ema.pt from t
 validate_restored_outputs.py   Validates restored_test_outputs/ and writes manifest.json
 generate_submission_assets.py  Regenerates submission/assets/ figures
 
+src/models/                    Model architectures (ResidualSRNet + experimental variants)
 src/                           Library code (models, losses, dataset, transforms, metrics, TTA, ...)
 tests/                         pytest suite (unit + integration)
 
-weights/residualsr_final_ema.pt   Final packaged inference weights (~2.4 MiB)
+weights/residualsr_final_ema.pt   Final packaged inference weights (~2.4 MiB) -- tracked in Git
 checkpoints/                      Full training checkpoints (NOT in Git; see below)
 restored_test_outputs/            Restored outputs for the official 400-image test set + manifest.json
+                                   (NOT in Git -- generated; see "Test output generation" below)
 results/                          Measured metrics/benchmark JSON (final_metrics.json, final_benchmark.json, ...)
 submission/                       Idea-submission slide content + figures (pipeline/metrics/sample panels)
 EXPERIMENT_LOG.md                 Full experiment history (30 experiments, what worked and what didn't)
@@ -225,9 +266,22 @@ python train.py --epochs 1 --max-train-samples 16 --max-val-samples 8 --checkpoi
 
 ## Validation / evaluation
 
+`--checkpoint` accepts either the tracked public artifact
+(`weights/residualsr_final_ema.pt` -- what a fresh clone actually has) or a
+full `train.py` training checkpoint
+(`checkpoints/<exp>/checkpoint_best.pt` -- only present if you trained
+locally, since `checkpoints/` is gitignored). Both reconstruct the model
+architecture automatically, with zero extra CLI flags:
+
+```bash
+python evaluate_checkpoint.py --checkpoint weights/residualsr_final_ema.pt --tta none --lpips
+python evaluate_checkpoint.py --checkpoint weights/residualsr_final_ema.pt --tta x8 --lpips
+```
+
+Equivalently, against a locally reproduced full training checkpoint:
+
 ```bash
 python evaluate_checkpoint.py --checkpoint checkpoints/exp23_ema_extended90/checkpoint_best.pt --tta none --lpips
-python evaluate_checkpoint.py --checkpoint checkpoints/exp23_ema_extended90/checkpoint_best.pt --tta x8 --lpips
 ```
 
 Reports L1/PSNR/SSIM (`src/metrics.py`, identical formulas/clipping
@@ -268,10 +322,13 @@ Produces 400 `.npy` outputs (one per official test input) plus
 `restored_test_outputs/manifest.json`. The official test set has no locally
 available ground truth, so no PSNR/SSIM/LPIPS is computed for it — see
 `manifest.json`'s validation fields (shape/dtype/finiteness/count) instead.
-`restored_test_outputs/` is ~102 MiB total (400 files x ~256 KiB); it is
-included in this repository as generated, but regenerating it with the one
-command above takes under 10 seconds on the development GPU if a smaller
-clone is preferred.
+
+`restored_test_outputs/` is ~102 MiB total (400 files x ~256 KiB) of
+**generated output** and is therefore intentionally excluded from Git via
+`.gitignore` — it is not tracked in this repository and will not exist after
+a fresh clone. Reproduce it at any time from the tracked final weights
+(`weights/residualsr_final_ema.pt`) with the two commands above; on the
+development GPU this takes under 10 seconds.
 
 ## Reproducibility
 
