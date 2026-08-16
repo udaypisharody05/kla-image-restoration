@@ -1,0 +1,39 @@
+{
+  "device": "cuda",
+  "gpu_name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "note": "Measured locally on the hardware named above -- NOT a prediction of H100 or any other GPU's performance. Re-run this script on the target machine for its own numbers.",
+  "checkpoint": "C:\\Projects\\kla-image-restoration\\weights\\residualsr_final_ema.pt",
+  "input_source": "synthetic 128x128 (seed=42)",
+  "input_shape": [
+    1,
+    1,
+    128,
+    128
+  ],
+  "model_load_seconds": 0.09913499999674968,
+  "modes": {
+    "none": {
+      "iterations": 20,
+      "warmup": 5,
+      "mean_seconds": 0.015566819997911808,
+      "median_seconds": 0.015179449983406812,
+      "min_seconds": 0.014893300016410649,
+      "max_seconds": 0.01683099998626858,
+      "stdev_seconds": 0.0007025011684551954,
+      "throughput_images_per_second": 64.23919593944966,
+      "peak_cuda_memory_mib": 21.27587890625
+    },
+    "x8": {
+      "iterations": 20,
+      "warmup": 5,
+      "mean_seconds": 0.050224690002505665,
+      "median_seconds": 0.04718575000879355,
+      "min_seconds": 0.0342565999890212,
+      "max_seconds": 0.08050490001915023,
+      "stdev_seconds": 0.01368742532712027,
+      "throughput_images_per_second": 19.910526076917765,
+      "peak_cuda_memory_mib": 23.33837890625
+    }
+  },
+  "x8_slowdown_factor": 3.22639370206908
+}

@@ -1,0 +1,29 @@
+{
+  "validation_split": {
+    "seed": 42,
+    "val_fraction": 0.2,
+    "samples": 640
+  },
+  "bicubic": {
+    "psnr_db": 23.1413,
+    "ssim": 0.550604,
+    "lpips": 0.424182
+  },
+  "residualsr_raw": {
+    "psnr_db": 27.9893,
+    "ssim": 0.756916,
+    "lpips": 0.302781
+  },
+  "residualsr_x8_tta": {
+    "psnr_db": 28.0355,
+    "ssim": 0.758519,
+    "lpips": 0.309627
+  },
+  "lpips_note": "lower is better; measured with lpips==0.1.4, net=alex, grayscale replicated to 3ch, [0,1]->[-1,1]",
+  "checkpoint": "checkpoints/exp23_ema_extended90/checkpoint_best.pt (EMA weights)",
+  "source_commands": [
+    "python evaluate_baseline.py --data-dir data/Data-public --val-fraction 0.2 --seed 42 --lpips",
+    "python evaluate_checkpoint.py --checkpoint checkpoints/exp23_ema_extended90/checkpoint_best.pt --tta none --lpips",
+    "python evaluate_checkpoint.py --checkpoint checkpoints/exp23_ema_extended90/checkpoint_best.pt --tta x8 --lpips"
+  ]
+}
