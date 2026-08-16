@@ -85,8 +85,7 @@ tests/                         pytest suite (unit + integration)
 
 weights/residualsr_final_ema.pt   Final packaged inference weights (~2.4 MiB) -- tracked in Git
 checkpoints/                      Full training checkpoints (NOT in Git; see below)
-restored_test_outputs/            Restored outputs for the official 400-image test set + manifest.json
-                                   (NOT in Git -- generated; see "Test output generation" below)
+restored_test_outputs/            Final restored outputs for all 400 official test images + manifest.json
 results/                          Measured metrics/benchmark JSON (final_metrics.json, final_benchmark.json, ...)
 submission/                       Idea-submission slide content + figures (pipeline/metrics/sample panels)
 EXPERIMENT_LOG.md                 Full experiment history (30 experiments, what worked and what didn't)

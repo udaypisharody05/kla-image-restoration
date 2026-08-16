@@ -20,16 +20,13 @@ unless it was actually run and scored.
 
 ## Slide 1 — Team Details
 
-> **Mandatory template fields below are not present anywhere in this
-> repository and must be filled in by the team before submission.**
-
 - **Team name**: `[Superconductor Semistars]`
 - **Members / roles**:
 `[Rohan Muthu (23BCE2243) — Data Processing & Degradation Analysis]`
 `[Uday Pisharody (23BCE2165) — Model Development, Training & System Integration]`
 `[Farwah Shajahan (23BEC0452) — Model Evaluation, Optimization & Experimentation]`
 - **College name**: `[Vellore Institute of Technology (VIT), Vellore]`
-- **Contact details** `(email/phone): [udaypisharody@gmail.com / +91 96067 60360]`
+- **Contact details** (email/phone): `[udaypisharody@gmail.com / +91 96067 60360]`
 
 ---
 
@@ -99,6 +96,22 @@ the network learns to invert whatever combination of noise and downsampling
 produced NoisyLR from GT, purely from paired examples. This is a deliberate
 simplicity choice, empirically justified by measurement (see below), not an
 omission.
+
+**How the three required degradation modes are addressed**, concretely, by
+this one model:
+
+- **Speckle / signal-dependent noise**: not modeled with a fixed
+  multiplicative formula — instead learned end-to-end from paired
+  noisy/clean training examples, so the network adapts to the actual
+  measured signal-dependence (see the forensics below) rather than an
+  assumed noise law.
+- **Gaussian / additive noise**: suppressed by the same residual CNN through
+  the identical paired-reconstruction (L1) objective — there is no separate
+  Gaussian-specific denoising stage; the single trunk learns whatever
+  additive component is present as part of the same inversion.
+- **2x super-resolution**: the trunk's reconstructed features are passed
+  through `PixelShuffle(2)`, producing the `256x256` restored HR image from
+  the `128x128` LR input in one learned upsampling step.
 
 **What the degradation actually looks like (measured, not assumed)** — a
 dedicated forensics pass (`analyze_degradation.py`, 3,200 pairs; full report
