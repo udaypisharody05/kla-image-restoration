@@ -31,6 +31,34 @@ per-pixel estimate of the same Experiment 22 noise model's sigma, computed
 from the real LR itself (see ``src/noise_conditioning.py``). Mutually
 independent of ``--synthetic-noise-prob`` -- Experiment 25 uses this instead
 of, not alongside, Experiment 24's augmentation.
+
+``--loss mixed`` (``--mixed-loss-alpha``, default ``0.5``) trains on
+``alpha*L1 + (1-alpha)*MSE`` -- see ``src/losses.py::MixedL1MSELoss``.
+
+``--finetune-from <checkpoint>`` loads a checkpoint's model weights only
+(preferring its EMA weights when present) and starts a brand-new,
+independent experiment: fresh optimizer/``--lr``/scheduler, epoch counter
+reset to 1, its own best-score tracking, and its own ``--checkpoint-dir``
+(which must differ from the source checkpoint's directory, so the source is
+only ever read, never overwritten). This is distinct from ``--resume``
+(which restores full training state -- optimizer, scheduler, epoch,
+best-score -- to continue the *same* interrupted run); the two are mutually
+exclusive.
+
+``--global-bicubic-residual`` (default off) switches ``--model residual_sr``
+to Experiment 17's ``ResidualSRBicubic`` (``prediction = bicubic_upsample(LR)
++ learned_residual(LR)``) -- see ``src/models/residual_sr_bicubic.py``. Same
+learned-branch topology and parameter count as ``ResidualSRNet``; only the
+final forward step differs.
+
+``--channel-attention`` (``--attention-reduction``, default ``8``) and
+``--multiscale-block`` (both default off, residual_sr only) each optionally
+swap in a variant residual block -- see
+``src/models/attention.py::ChannelAttention`` and
+``src/models/residual_sr.py::MultiScaleBlock``. Independently selectable,
+never auto-combined, and structured so a plain ``--model residual_sr`` run
+with neither flag reconstructs the exact historical architecture and
+checkpoint format.
 """
 
 import argparse
@@ -89,6 +117,8 @@ def build_datasets(
     max_train_samples: int | None,
     max_val_samples: int | None,
     synthetic_noise: SyntheticNoiseAugmentation | None = None,
+    hard_patch_sampling: bool = False,
+    hard_patch_prob: float = 0.5,
 ) -> tuple[PairedRestorationDataset, PairedRestorationDataset, int]:
     """Rebuild the canonical split and wrap it with the project's dataset classes."""
     layout = discover_layout(data_dir)
@@ -99,7 +129,13 @@ def build_datasets(
     if max_val_samples is not None:
         validation_pairs = validation_pairs[:max_val_samples]
 
-    training_transform = create_training_transform(crop_size=crop_size, scale=scale, augment=True)
+    training_transform = create_training_transform(
+        crop_size=crop_size,
+        scale=scale,
+        augment=True,
+        hard_patch_sampling=hard_patch_sampling,
+        hard_patch_prob=hard_patch_prob,
+    )
     train_dataset = PairedRestorationDataset(
         train_pairs, scale=scale, transform=training_transform, synthetic_noise=synthetic_noise
     )
@@ -196,7 +232,12 @@ def current_lr(optimizer: torch.optim.Optimizer) -> float:
 
 
 def warn_on_resume_config_mismatch(
-    previous_config: dict, seed: int, val_fraction: float, crop_size: int
+    previous_config: dict,
+    seed: int,
+    val_fraction: float,
+    crop_size: int,
+    hard_patch_sampling: bool = False,
+    hard_patch_prob: float = 0.5,
 ) -> None:
     """Print explicit (never silent) warnings when resume args differ from what
     the checkpoint's stored ``training_config`` actually used.
@@ -219,6 +260,17 @@ def warn_on_resume_config_mismatch(
             f"stored training crop_size ({previous_config.get('crop_size')}); training "
             "will continue using the new crop size immediately, which is a different "
             "training regime than produced this checkpoint's saved metrics."
+        )
+    if previous_config.get("hard_patch_sampling") is not None and (
+        previous_config.get("hard_patch_sampling") != hard_patch_sampling
+        or (hard_patch_sampling and previous_config.get("hard_patch_prob") != hard_patch_prob)
+    ):
+        print(
+            f"WARNING: --hard-patch-sampling/--hard-patch-prob ({hard_patch_sampling}/"
+            f"{hard_patch_prob}) differ from the checkpoint's stored training_config "
+            f"(hard_patch_sampling={previous_config.get('hard_patch_sampling')}, "
+            f"hard_patch_prob={previous_config.get('hard_patch_prob')}); training will "
+            "continue using the new sampling policy immediately."
         )
 
 
@@ -430,6 +482,83 @@ def load_checkpoint_for_resume(
     return checkpoint["epoch"] + 1, checkpoint["best_val_psnr"], checkpoint["training_config"]
 
 
+def load_weights_for_finetune(
+    path: Path, model: nn.Module, device: torch.device, prefer_ema: bool = True
+) -> None:
+    """Load only *model*'s weights from *path* -- no optimizer, scheduler,
+    epoch, or best-score state.
+
+    Used to start an independent fine-tuning experiment (fresh
+    optimizer/LR/scheduler, epoch counter reset, its own checkpoint
+    directory) from an existing checkpoint's weights, unlike
+    ``load_checkpoint_for_resume`` (which restores full training state to
+    continue the *same* interrupted run). *path* is only ever read here,
+    never written to.
+
+    Prefers the checkpoint's EMA shadow weights when present (mirrors
+    ``evaluate_checkpoint.load_model``'s default): for an EMA-trained
+    checkpoint, the EMA weights are what actually produced its recorded
+    validation PSNR, so that is the more sensible fine-tuning starting point
+    than the noisier live weights.
+    """
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    ema_state_dict = checkpoint.get("ema_state_dict")
+    if prefer_ema and ema_state_dict is not None:
+        model.load_state_dict(ema_state_dict)
+        print(f"Fine-tuning from {path}: loaded EMA weights (optimizer/scheduler/epoch are fresh).")
+    else:
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"Fine-tuning from {path}: loaded live weights (optimizer/scheduler/epoch are fresh).")
+
+
+def validate_finetune_args(
+    resume: Path | None, finetune_from: Path | None, checkpoint_dir: Path
+) -> None:
+    """Fail fast, before any dataset/model work, on invalid ``--resume``/
+    ``--finetune-from`` combinations.
+
+    The two express mutually exclusive intents -- continue an interrupted
+    run with its exact saved state, vs. start a brand-new experiment from
+    existing weights -- so requesting both is always a mistake. A
+    fine-tuning run must also never share its ``--checkpoint-dir`` with the
+    source checkpoint's own directory, so it can never overwrite the
+    checkpoint it started from.
+    """
+    if resume is not None and finetune_from is not None:
+        raise ValueError("--resume and --finetune-from are mutually exclusive: pick one.")
+    if finetune_from is not None:
+        source_dir = finetune_from.resolve().parent
+        if checkpoint_dir.resolve() == source_dir:
+            raise ValueError(
+                f"--checkpoint-dir ({checkpoint_dir}) must not be the same directory as "
+                f"the --finetune-from checkpoint's directory ({source_dir}); a fine-tuning "
+                "run must save into a separate checkpoint directory so it can never "
+                "overwrite the source checkpoint."
+            )
+
+
+def resolve_model_architecture(model_name: str, global_bicubic_residual: bool) -> str:
+    """Map ``--model``/``--global-bicubic-residual`` to the actual architecture
+    name passed to ``build_model_config``.
+
+    Off (the default) returns *model_name* completely unchanged, so every
+    historical command that never mentions the flag is unaffected -- this is
+    never silently turned on. On, only ``residual_sr`` (which becomes
+    ``residual_sr_bicubic``, reusing Experiment 17's already-implemented,
+    already-tested ``ResidualSRBicubic``) and ``residual_sr_bicubic`` itself
+    (already the target -- a harmless no-op) are accepted; every other
+    architecture raises rather than silently ignoring the flag.
+    """
+    if not global_bicubic_residual:
+        return model_name
+    if model_name in ("residual_sr", "residual_sr_bicubic"):
+        return "residual_sr_bicubic"
+    raise ValueError(
+        "--global-bicubic-residual is only supported for --model residual_sr "
+        f"(reuses Experiment 17's ResidualSRBicubic implementation), not --model {model_name}."
+    )
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: torch.utils.data.DataLoader,
@@ -517,6 +646,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--scale", type=int, default=2)
     parser.add_argument("--crop-size", type=int, default=64)
+    parser.add_argument(
+        "--hard-patch-sampling",
+        action="store_true",
+        help=(
+            "Bias training-crop origins toward high-gradient-energy ('hard'/informative) "
+            "regions instead of always sampling uniformly at random. Default: off (plain "
+            "PairedRandomCrop, byte-for-byte historical behavior)."
+        ),
+    )
+    parser.add_argument(
+        "--hard-patch-prob",
+        type=float,
+        default=0.5,
+        help=(
+            "Probability of using a gradient-energy-weighted crop origin per training sample "
+            "(ignored unless --hard-patch-sampling); the rest fall back to a plain uniform-"
+            "random crop, so training is never restricted to only high-gradient regions."
+        ),
+    )
     parser.add_argument("--num-features", type=int, default=32, help="Residual block channel width")
     parser.add_argument("--num-blocks", type=int, default=4, help="Number of residual blocks")
     parser.add_argument(
@@ -562,6 +710,86 @@ def parse_args() -> argparse.Namespace:
         default=2.0,
         help="SwinIR-lite MLP hidden-dim expansion ratio (ignored unless --model swinir_lite)",
     )
+    parser.add_argument(
+        "--global-bicubic-residual",
+        action="store_true",
+        help=(
+            "prediction = bicubic_upsample(LR) + learned_residual(LR) instead of the learned "
+            "branch alone (switches --model residual_sr to Experiment 17's ResidualSRBicubic; "
+            "same topology/parameter count). Default: off. Only valid with --model residual_sr "
+            "or --model residual_sr_bicubic."
+        ),
+    )
+    parser.add_argument(
+        "--channel-attention",
+        action="store_true",
+        help=(
+            "Insert a lightweight squeeze-and-excitation channel-attention gate into each "
+            "ResidualSR residual block (ignored unless --model residual_sr). Default: off."
+        ),
+    )
+    parser.add_argument(
+        "--attention-reduction",
+        type=int,
+        default=8,
+        help="Channel-attention squeeze reduction ratio (ignored unless --channel-attention)",
+    )
+    parser.add_argument(
+        "--multiscale-block",
+        action="store_true",
+        help=(
+            "Replace ResidualSR's residual blocks with a local-3x3 + dilated-3x3(dilation=2) "
+            "multi-scale block for a larger receptive field (ignored unless --model "
+            "residual_sr). Independent of --channel-attention -- never auto-combined. "
+            "Mutually exclusive with --rdb-block (both replace the residual block type). "
+            "Default: off."
+        ),
+    )
+    parser.add_argument(
+        "--rdb-block",
+        action="store_true",
+        help=(
+            "Replace ResidualSR's residual blocks with a lightweight Residual Dense Block "
+            "(dense feature reuse within each block, inspired by RDN but not a full RDN; "
+            "ignored unless --model residual_sr). Mutually exclusive with --multiscale-block. "
+            "Default: off."
+        ),
+    )
+    parser.add_argument(
+        "--rdb-growth-rate",
+        type=int,
+        default=16,
+        help="Channels added per dense layer inside each RDB (ignored unless --rdb-block)",
+    )
+    parser.add_argument(
+        "--rdb-num-layers",
+        type=int,
+        default=3,
+        help="Number of densely-connected conv layers per RDB (ignored unless --rdb-block)",
+    )
+    parser.add_argument(
+        "--denoise-stem",
+        action="store_true",
+        help=(
+            "Insert an optional lightweight pre-trunk denoising stem (Conv3x3 -> gated "
+            "restoration blocks -> Conv3x3 residual correction) before ResidualSR's existing "
+            "feature trunk (ignored unless --model residual_sr); see "
+            "src/models/denoise_stem.py. Default: off."
+        ),
+    )
+    parser.add_argument(
+        "--denoise-stem-features",
+        type=int,
+        default=32,
+        help="Channel width inside the denoise stem (ignored unless --denoise-stem)",
+    )
+    parser.add_argument(
+        "--denoise-stem-blocks",
+        type=int,
+        default=2,
+        help="Number of gated restoration blocks inside the denoise stem (2-4 recommended; "
+        "ignored unless --denoise-stem)",
+    )
     parser.add_argument("--device", type=str, default=None, help="cuda or cpu; default auto-detects")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--num-workers", type=int, default=0)
@@ -573,6 +801,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--resume", type=Path, default=None, help="Checkpoint path to resume training from"
+    )
+    parser.add_argument(
+        "--finetune-from",
+        type=Path,
+        default=None,
+        help=(
+            "Load model weights only (preferring EMA weights if present) from this checkpoint "
+            "and start a brand-new experiment: fresh optimizer/--lr/scheduler, epoch counter "
+            "reset, its own best-score tracking. Unlike --resume (restores full training state "
+            "to continue the same run), the source checkpoint is only read, never written to -- "
+            "--checkpoint-dir must be a different directory. Mutually exclusive with --resume."
+        ),
     )
     parser.add_argument(
         "--scheduler",
@@ -674,7 +914,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--loss",
         type=str,
-        choices=["l1", "mse", "charbonnier", "l1_ssim"],
+        choices=["l1", "mse", "charbonnier", "l1_ssim", "mixed", "weighted_l1"],
         default="l1",
         help="Reconstruction loss. 'l1' (default) reproduces Experiments 1-3 exactly.",
     )
@@ -689,6 +929,30 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.1,
         help="Weight on (1 - differentiable SSIM) in L1 + weight*(1-SSIM) (ignored unless --loss l1_ssim)",
+    )
+    parser.add_argument(
+        "--mixed-loss-alpha",
+        type=float,
+        default=0.5,
+        help="Weight on L1 in alpha*L1 + (1-alpha)*MSE (ignored unless --loss mixed)",
+    )
+    parser.add_argument(
+        "--weighted-l1-eps",
+        type=float,
+        default=1e-2,
+        help=(
+            "Stabilizer added to the fitted noise std before inverting for per-pixel weights "
+            "(ignored unless --loss weighted_l1); see src/losses.py::VarianceWeightedL1Loss."
+        ),
+    )
+    parser.add_argument(
+        "--weighted-l1-variance-floor",
+        type=float,
+        default=0.0,
+        help=(
+            "Floor on the fitted Experiment 22 variance model (ignored unless --loss "
+            "weighted_l1); 0.0 (default) reproduces the model exactly as fitted."
+        ),
     )
     parser.add_argument(
         "--gpu-temp-limit",
@@ -722,6 +986,11 @@ def main() -> None:
     set_seed(args.seed)
     device = select_device(args.device)
     print(f"Using device: {device}")
+
+    # Fail fast on invalid --resume/--finetune-from combinations, before any
+    # dataset/model work -- same "validate before doing anything expensive"
+    # policy as the thermal guard below.
+    validate_finetune_args(args.resume, args.finetune_from, args.checkpoint_dir)
 
     # Constructed (and validated) early, before any dataset work, so invalid
     # thermal args fail fast. Disabled by default (--gpu-temp-limit 0); when
@@ -767,7 +1036,13 @@ def main() -> None:
         args.max_train_samples,
         args.max_val_samples,
         synthetic_noise=synthetic_noise,
+        hard_patch_sampling=args.hard_patch_sampling,
+        hard_patch_prob=args.hard_patch_prob,
     )
+    if args.hard_patch_sampling:
+        print(f"Hard-patch sampling: enabled (prob={args.hard_patch_prob})")
+    else:
+        print("Hard-patch sampling: disabled")
     print(
         f"Discovered {total_pairs} pairs -> "
         f"train={len(train_dataset)} val={len(validation_dataset)}"
@@ -795,10 +1070,13 @@ def main() -> None:
     noise_conditioning_config = build_noise_conditioning_config(
         args.noise_conditioning, variance_floor=args.noise_conditioning_variance_floor
     )
+    # Off (the default) returns args.model unchanged; only ever raises/switches
+    # when --global-bicubic-residual is explicitly passed -- never silent.
+    model_name = resolve_model_architecture(args.model, args.global_bicubic_residual)
     # in_channels=2 only because conv_in must accept the extra sigma channel --
     # every other architectural detail (blocks, upsampling head) is untouched.
     model_config = build_model_config(
-        args.model,
+        model_name,
         in_channels=2 if noise_conditioning_config else 1,
         out_channels=1,
         num_features=args.num_features,
@@ -810,19 +1088,40 @@ def main() -> None:
         num_heads=args.num_heads,
         window_size=args.window_size,
         mlp_ratio=args.mlp_ratio,
+        channel_attention=args.channel_attention,
+        attention_reduction=args.attention_reduction,
+        multiscale_block=args.multiscale_block,
+        rdb_block=args.rdb_block,
+        rdb_growth_rate=args.rdb_growth_rate,
+        rdb_num_layers=args.rdb_num_layers,
+        denoise_stem=args.denoise_stem,
+        denoise_stem_features=args.denoise_stem_features,
+        denoise_stem_blocks=args.denoise_stem_blocks,
     )
     base_model = build_model(model_config).to(device)
     # wrap_for_conditioning returns base_model itself (no wrapper at all) when
     # conditioning is off, so every historical command's model object is
     # byte-for-byte the same as before this feature existed.
     model = wrap_for_conditioning(base_model, noise_conditioning_config)
+    if args.finetune_from is not None:
+        # Loads weights only, before the optimizer/EMA are constructed below --
+        # so EMA's initial deep-copy (if --ema is also requested) captures
+        # these fine-tuned starting weights, not a fresh random init.
+        load_weights_for_finetune(args.finetune_from, model, device)
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model: {args.model} ({param_count:,} trainable parameters)")
+    print(f"Model: {model_name} ({param_count:,} trainable parameters)")
     print(f"Model config: {model_config}")
     print(f"Noise conditioning: {noise_conditioning_config or 'disabled'}")
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    loss_config = build_loss_config(args.loss, args.charbonnier_eps, args.ssim_weight)
+    loss_config = build_loss_config(
+        args.loss,
+        args.charbonnier_eps,
+        args.ssim_weight,
+        args.mixed_loss_alpha,
+        args.weighted_l1_eps,
+        args.weighted_l1_variance_floor,
+    )
     loss_fn = build_loss(loss_config)
     label = loss_label(loss_config["name"])
     print(f"Loss: {loss_config}")
@@ -850,6 +1149,8 @@ def main() -> None:
         "seed": args.seed,
         "val_fraction": args.val_fraction,
         "crop_size": args.crop_size,
+        "hard_patch_sampling": args.hard_patch_sampling,
+        "hard_patch_prob": args.hard_patch_prob,
         "data_dir": str(args.data_dir),
         # Informational only -- a runtime/wall-clock setting, not part of the
         # ML computation. warn_on_resume_config_mismatch() and
@@ -859,6 +1160,9 @@ def main() -> None:
         "gpu_temp_resume": args.gpu_temp_resume,
         "gpu_temp_check_interval": args.gpu_temp_check_interval,
         "gpu_temp_poll_seconds": args.gpu_temp_poll_seconds,
+        # Informational only, like the gpu_temp_* fields above -- records
+        # provenance for reproducibility but is never compared during resume.
+        "finetuned_from": str(args.finetune_from) if args.finetune_from is not None else None,
     }
 
     start_epoch = 1
@@ -884,7 +1188,12 @@ def main() -> None:
             f"current LR: {current_lr(optimizer):.6e})"
         )
         warn_on_resume_config_mismatch(
-            previous_config, args.seed, args.val_fraction, args.crop_size
+            previous_config,
+            args.seed,
+            args.val_fraction,
+            args.crop_size,
+            args.hard_patch_sampling,
+            args.hard_patch_prob,
         )
         if start_epoch > args.epochs:
             print(f"Nothing to do: resumed epoch {start_epoch} is beyond --epochs {args.epochs}.")

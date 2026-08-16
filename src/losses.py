@@ -10,6 +10,8 @@ import torch
 import torch.nn.functional as functional
 from torch import nn
 
+from .synthetic_noise import VARIANCE_COEFFICIENTS, noise_sigma
+
 
 class CharbonnierLoss(nn.Module):
     """Smooth L1-like loss: ``mean(sqrt((prediction - target)**2 + eps**2))``.
@@ -121,7 +123,94 @@ class L1SSIMLoss(nn.Module):
         return self.l1(prediction, target) + self.ssim_weight * self.ssim_loss(prediction, target)
 
 
-def build_loss_config(name: str, charbonnier_eps: float = 1e-3, ssim_weight: float = 0.1) -> dict:
+class MixedL1MSELoss(nn.Module):
+    """``alpha * L1 + (1 - alpha) * MSE``.
+
+    L1 is robust to outliers; MSE is what PSNR is directly defined in terms
+    of (``PSNR = 10*log10(peak**2 / MSE)``). Blending the two lets a
+    fine-tuning run lean toward the PSNR objective without abandoning L1's
+    robustness outright -- see ``--loss mixed --mixed-loss-alpha`` in
+    ``train.py``.
+    """
+
+    def __init__(self, alpha: float = 0.5) -> None:
+        super().__init__()
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha must be between 0 and 1")
+        self.alpha = alpha
+        self.l1 = nn.L1Loss()
+        self.mse = nn.MSELoss()
+
+    def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return self.alpha * self.l1(prediction, target) + (1.0 - self.alpha) * self.mse(
+            prediction, target
+        )
+
+
+class VarianceWeightedL1Loss(nn.Module):
+    """L1 reweighted by the inverse of the Experiment 22 signal-dependent noise
+    model, so pixels the measured degradation makes easier to recover (low
+    intensity, low noise variance) contribute more gradient than pixels it
+    makes intrinsically harder (bright, high noise variance) -- unlike plain
+    L1, which weights every pixel equally.
+
+    This is the direct implementation of the Experiment 22 forensics report's
+    HIGHEST-ranked, previously-untried recommendation (see
+    ``results/degradation_analysis/degradation_report.md``, "Ranked strategies
+    for Experiment 22", item 1): "weight the existing L1 by 1/sqrt(var(I))
+    using the fitted coefficients." Reuses
+    ``src.synthetic_noise.noise_variance``'s exact fitted coefficients rather
+    than re-deriving them, so this is the same measured law Experiments 24/25
+    already use, applied a third way.
+
+    **Documented approximation:** the variance model
+    ``var(I) = c0 + c1*I + c2*I**2`` was fit against *LR-space* intensity vs.
+    *LR-space* residual noise (Experiment 22 measured the GT->NoisyLR
+    degradation directly). This loss instead estimates ``I`` from the *target*
+    HR image (clamped to ``[0,1]``, the same clamp convention
+    ``src/noise_conditioning.py`` uses) because that is the space this loss
+    operates in -- the assumption is that HR brightness is a reasonable proxy
+    for the LR brightness at the corresponding location, since bicubic
+    downsampling (Experiment 22's best-fit kernel) does not change local mean
+    intensity much. This is an extrapolation of a measured law, not itself a
+    directly measured quantity, and should be validated empirically (see
+    ``--loss weighted_l1`` in ``train.py``) rather than assumed.
+
+    Per-pixel weights are normalized to a batch mean of 1 (``weight /
+    weight.mean()``) so the loss stays on the same numeric scale as plain L1,
+    keeping existing ``--lr`` values sensible starting points instead of
+    silently rescaling the effective learning rate.
+    """
+
+    def __init__(
+        self,
+        eps: float = 1e-2,
+        coefficients: tuple[float, float, float] = VARIANCE_COEFFICIENTS,
+        variance_floor: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if eps <= 0:
+            raise ValueError("eps must be positive")
+        self.eps = eps
+        self.coefficients = coefficients
+        self.variance_floor = variance_floor
+
+    def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        intensity = torch.clamp(target, 0.0, 1.0)
+        sigma = noise_sigma(intensity, self.coefficients, self.variance_floor)
+        weight = 1.0 / (sigma + self.eps)
+        weight = weight / weight.mean()
+        return (weight * torch.abs(prediction - target)).mean()
+
+
+def build_loss_config(
+    name: str,
+    charbonnier_eps: float = 1e-3,
+    ssim_weight: float = 0.1,
+    mixed_loss_alpha: float = 0.5,
+    weighted_l1_eps: float = 1e-2,
+    weighted_l1_variance_floor: float = 0.0,
+) -> dict:
     """Turn CLI loss options into a plain, checkpoint-serializable dict."""
     if name == "l1":
         return {"name": "l1"}
@@ -131,6 +220,19 @@ def build_loss_config(name: str, charbonnier_eps: float = 1e-3, ssim_weight: flo
         return {"name": "charbonnier", "epsilon": charbonnier_eps}
     if name == "l1_ssim":
         return {"name": "l1_ssim", "ssim_weight": ssim_weight}
+    if name == "mixed":
+        if not 0.0 <= mixed_loss_alpha <= 1.0:
+            raise ValueError("mixed_loss_alpha must be between 0 and 1")
+        return {"name": "mixed", "alpha": mixed_loss_alpha}
+    if name == "weighted_l1":
+        if weighted_l1_eps <= 0:
+            raise ValueError("weighted_l1_eps must be positive")
+        return {
+            "name": "weighted_l1",
+            "eps": weighted_l1_eps,
+            "variance_coefficients": list(VARIANCE_COEFFICIENTS),
+            "variance_floor": weighted_l1_variance_floor,
+        }
     raise ValueError(f"Unknown loss: {name}")
 
 
@@ -145,6 +247,14 @@ def build_loss(loss_config: dict) -> nn.Module:
         return CharbonnierLoss(eps=loss_config["epsilon"])
     if name == "l1_ssim":
         return L1SSIMLoss(ssim_weight=loss_config["ssim_weight"])
+    if name == "mixed":
+        return MixedL1MSELoss(alpha=loss_config["alpha"])
+    if name == "weighted_l1":
+        return VarianceWeightedL1Loss(
+            eps=loss_config["eps"],
+            coefficients=tuple(loss_config["variance_coefficients"]),
+            variance_floor=loss_config["variance_floor"],
+        )
     raise ValueError(f"Unknown loss: {name}")
 
 
@@ -158,4 +268,8 @@ def loss_label(name: str) -> str:
         return "Charbonnier"
     if name == "l1_ssim":
         return "L1+SSIM"
+    if name == "mixed":
+        return "Mixed(L1+MSE)"
+    if name == "weighted_l1":
+        return "VarianceWeightedL1"
     raise ValueError(f"Unknown loss: {name}")

@@ -99,6 +99,134 @@ def apply_paired_geometry(
     return transformed_input.contiguous(), transformed_target.contiguous()
 
 
+def gradient_energy_map(input_tensor: torch.Tensor) -> torch.Tensor:
+    """Simple per-pixel gradient-magnitude score, summed over channels.
+
+    Central-difference approximation of |dI/dx| + |dI/dy| (a cheap Sobel-like
+    proxy for local high-frequency content), zero-padded at the border so the
+    returned map has the same ``[H,W]`` shape as the input. Used only to
+    *rank* candidate crop origins for informative-patch sampling
+    (``sample_informative_crop_origin``) -- not a training signal itself.
+    """
+    if input_tensor.ndim != 3:
+        raise ValueError(f"Expected [C,H,W], got shape {tuple(input_tensor.shape)}")
+    channels = input_tensor.to(torch.float32)
+    height, width = channels.shape[-2:]
+    dx = torch.zeros((channels.shape[0], height, width), dtype=torch.float32)
+    dy = torch.zeros((channels.shape[0], height, width), dtype=torch.float32)
+    dx[:, :, 1:] = torch.abs(channels[:, :, 1:] - channels[:, :, :-1])
+    dy[:, 1:, :] = torch.abs(channels[:, 1:, :] - channels[:, :-1, :])
+    return (dx + dy).sum(dim=0)
+
+
+def sample_informative_crop_origin(
+    input_tensor: torch.Tensor,
+    crop_size: int | tuple[int, int],
+    generator: torch.Generator | None = None,
+) -> tuple[int, int]:
+    """Sample a crop origin ``(y, x)`` with probability proportional to the
+    summed gradient energy of the crop window it defines.
+
+    Every valid origin (the window fits entirely inside ``input_tensor``) has
+    a positive chance of being chosen -- this is weighted-random sampling
+    toward high-information regions, not a deterministic argmax -- so the
+    same image can still yield different informative crops across epochs
+    while remaining biased away from flat, low-information regions. Window
+    sums are computed in ``O(H*W)`` via a 2D prefix-sum table (integral
+    image), not one pass per candidate origin, so this stays cheap enough to
+    run inside a ``Dataset.__getitem__``.
+    """
+    crop_height, crop_width = _crop_size_tuple(crop_size)
+    input_height, input_width = input_tensor.shape[-2:]
+    maximum_y = input_height - crop_height
+    maximum_x = input_width - crop_width
+    if maximum_y < 0 or maximum_x < 0:
+        raise ValueError(
+            f"LR crop {(crop_height, crop_width)} exceeds input size "
+            f"{(input_height, input_width)}"
+        )
+    energy = gradient_energy_map(input_tensor)
+    # Zero-padded prefix-sum table: integral[i, j] = sum of energy[:i, :j].
+    integral = torch.zeros((input_height + 1, input_width + 1), dtype=torch.float32)
+    integral[1:, 1:] = torch.cumsum(torch.cumsum(energy, dim=0), dim=1)
+    bottom_right = integral[crop_height : crop_height + maximum_y + 1, crop_width : crop_width + maximum_x + 1]
+    top_right = integral[0 : maximum_y + 1, crop_width : crop_width + maximum_x + 1]
+    bottom_left = integral[crop_height : crop_height + maximum_y + 1, 0 : maximum_x + 1]
+    top_left = integral[0 : maximum_y + 1, 0 : maximum_x + 1]
+    window_sums = bottom_right - top_right - bottom_left + top_left
+    # A small positive floor keeps every origin sampleable (nonzero
+    # probability) even for a perfectly flat window, instead of only ever
+    # picking among whichever windows happen to have nonzero energy.
+    weights = window_sums.reshape(-1) + 1e-6
+    flat_index = int(torch.multinomial(weights, 1, generator=generator).item())
+    y = flat_index // (maximum_x + 1)
+    x = flat_index % (maximum_x + 1)
+    return y, x
+
+
+class PairedHardPatchCrop:
+    """Aligned LR/GT crop biased toward high-gradient-energy regions.
+
+    Uses ``sample_informative_crop_origin`` on the LR tensor, then crops both
+    LR and GT at the scaled-consistent coordinates via the same
+    ``aligned_paired_crop`` helper ``PairedRandomCrop`` uses -- so alignment
+    can never diverge between the two crop strategies.
+    """
+
+    def __init__(
+        self,
+        crop_size: int | tuple[int, int] = 64,
+        scale: int = 2,
+        generator: torch.Generator | None = None,
+    ) -> None:
+        self.crop_size = _crop_size_tuple(crop_size)
+        self.scale = scale
+        self.generator = generator
+
+    def __call__(
+        self, input_tensor: torch.Tensor, target_tensor: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        y, x = sample_informative_crop_origin(input_tensor, self.crop_size, self.generator)
+        return aligned_paired_crop(input_tensor, target_tensor, self.crop_size, y, x, self.scale)
+
+
+class PairedMixedCrop:
+    """Per-sample mixture of ``PairedHardPatchCrop`` and ``PairedRandomCrop``.
+
+    With probability ``hard_patch_prob`` (default 0.5) use the
+    gradient-energy-weighted informative crop; otherwise fall back to a plain
+    uniform-random crop -- so training is never restricted to exclusively
+    high-gradient regions (per the project spec: mix, don't replace).
+    ``hard_patch_prob=0.0``/``1.0`` are valid and select one strategy
+    unconditionally. The mixture decision itself is drawn from the same
+    ``generator``, so the whole pipeline (mixture choice + crop origin) is a
+    pure function of the generator's seed and call sequence.
+    """
+
+    def __init__(
+        self,
+        crop_size: int | tuple[int, int] = 64,
+        scale: int = 2,
+        hard_patch_prob: float = 0.5,
+        generator: torch.Generator | None = None,
+    ) -> None:
+        if not 0.0 <= hard_patch_prob <= 1.0:
+            raise ValueError(f"hard_patch_prob must be between 0 and 1, got {hard_patch_prob}")
+        self.hard_patch_prob = hard_patch_prob
+        self.generator = generator
+        self.hard_patch_crop = PairedHardPatchCrop(crop_size=crop_size, scale=scale, generator=generator)
+        self.random_crop = PairedRandomCrop(crop_size=crop_size, scale=scale, generator=generator)
+
+    def __call__(
+        self, input_tensor: torch.Tensor, target_tensor: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        use_hard_patch = bool(
+            torch.rand((), generator=self.generator).item() < self.hard_patch_prob
+        )
+        crop = self.hard_patch_crop if use_hard_patch else self.random_crop
+        return crop(input_tensor, target_tensor)
+
+
 class PairedRandomCrop:
     """Random aligned LR/GT crop including every legal boundary coordinate."""
 
@@ -204,20 +332,34 @@ def create_training_transform(
     rotate90: bool = True,
     generator: torch.Generator | None = None,
     seed: int | None = None,
+    hard_patch_sampling: bool = False,
+    hard_patch_prob: float = 0.5,
 ) -> PairedCompose:
     """Construct the standard aligned crop then spatial augmentation pipeline.
 
     Supplying ``seed`` or ``generator`` is useful for deterministic single-worker
     tests. With neither supplied, PyTorch's process-local RNG is used, including
     DataLoader worker seeds. Generator state advances on every sample access.
+
+    ``hard_patch_sampling=False`` (the default) uses plain ``PairedRandomCrop``,
+    byte-for-byte the historical behavior. When ``True``, ``PairedMixedCrop``
+    is used instead: with probability ``hard_patch_prob`` the crop origin is
+    drawn weighted toward high-gradient-energy regions
+    (``sample_informative_crop_origin``), otherwise a plain uniform-random crop
+    is used, exactly like before -- see ``src/transforms.py::PairedMixedCrop``.
     """
     if generator is not None and seed is not None:
         raise ValueError("Provide either generator or seed, not both")
     if seed is not None:
         generator = torch.Generator().manual_seed(seed)
-    transforms: list[PairedTransform] = [
-        PairedRandomCrop(crop_size=crop_size, scale=scale, generator=generator)
-    ]
+    crop: PairedTransform
+    if hard_patch_sampling:
+        crop = PairedMixedCrop(
+            crop_size=crop_size, scale=scale, hard_patch_prob=hard_patch_prob, generator=generator
+        )
+    else:
+        crop = PairedRandomCrop(crop_size=crop_size, scale=scale, generator=generator)
+    transforms: list[PairedTransform] = [crop]
     if augment:
         transforms.append(
             PairedRandomGeometricAugmentation(

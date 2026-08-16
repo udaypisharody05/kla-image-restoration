@@ -1,8 +1,46 @@
-numpy==2.3.5
-Pillow==12.2.0
+# Complete pip-freeze snapshot of the training/development environment
+# (Python 3.12.10, Windows, NVIDIA GeForce RTX 4060 Laptop GPU).
+#
+# torch/torchvision are listed WITHOUT their local "+cu128" CUDA build
+# suffix -- that suffix is only resolvable via PyTorch's own package index
+# (https://download.pytorch.org/whl/cu128), not plain PyPI, so keeping it
+# here would make `pip install -r requirements.txt` fail on a machine
+# without that extra index configured. Plain `pip install -r
+# requirements.txt` installs the CPU build (works everywhere, including
+# machines with no GPU); see README.md "Installation" for the one extra
+# command to install the matching CUDA build instead. Every other package
+# below is exactly what training/evaluation/inference used.
+colorama==0.4.6
+contourpy==1.3.3
+cycler==0.12.1
+filelock==3.32.3
+fonttools==4.63.0
+fsspec==2026.7.0
 imageio==2.37.4
-tifffile==2026.7.31
+iniconfig==2.3.0
+Jinja2==3.1.6
+kiwisolver==1.5.0
+lazy-loader==0.5
+lpips==0.1.4
+MarkupSafe==3.0.3
 matplotlib==3.11.1
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.3.5
+packaging==26.3
+Pillow==12.2.0
+pluggy==1.6.0
+Pygments==2.20.0
+pyparsing==3.3.2
 pytest==9.1.1
+python-dateutil==2.9.0.post0
 scikit-image==0.25.2
+scipy==1.18.0
+setuptools==78.1.0
+six==1.17.0
+sympy==1.14.0
+tifffile==2026.7.31
 torch==2.7.1
+torchvision==0.22.1
+tqdm==4.70.0
+typing_extensions==4.16.0

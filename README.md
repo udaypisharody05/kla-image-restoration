@@ -1,12 +1,76 @@
-# KLA Image Restoration
+# KLA / i4C Hackathon — AI-Based Restoration of Degraded Images
 
-Utilities for inspecting and validating the paired image-restoration dataset.
+Restores noisy, low-resolution grayscale semiconductor-style images to clean,
+2x-higher-resolution images: `128x128` noisy LR -> `256x256` restored HR.
+This repository is a submission for the **AI-Based Restoration of Degraded
+Images** problem statement.
+
+## Overview
+
+- **Problem**: paired `.npy` grayscale images, `NoisyLR` (~128x128,
+  signal-dependent noise, no blur, no fixed pattern — see
+  [`results/degradation_analysis/degradation_report.md`](results/degradation_analysis/degradation_report.md))
+  and `GT` (~256x256, exact 2x). The task is a joint denoise + 2x
+  super-resolution problem solved end-to-end by one model trained on paired
+  supervision — there is no separate denoising stage.
+- **Model**: `ResidualSRNet` (`src/models/residual_sr.py`) — a small residual
+  CNN (initial 3x3 conv -> 8 residual blocks -> conv -> `PixelShuffle(2)`),
+  64 feature channels, **630,724 trainable parameters**, trained with EMA
+  weight averaging (decay 0.999).
+- **Final champion**: `checkpoints/exp23_ema_extended90/checkpoint_best.pt`
+  (EMA weights), packaged for inference as
+  [`weights/residualsr_final_ema.pt`](weights/residualsr_final_ema.pt). See
+  [EXPERIMENT_LOG.md](EXPERIMENT_LOG.md) for the full ablation history that
+  led to this configuration.
+- **Measured validation results** (640-sample canonical split, seed 42; see
+  [Final metrics](#final-metrics)): **27.9893 dB PSNR / 0.756916 SSIM**
+  (raw), **28.0355 dB PSNR / 0.758519 SSIM** (+x8 TTA), vs. a **23.1413 dB /
+  0.550604** bicubic baseline.
+
+## Repository structure
+
+```text
+inference.py                   Standalone restoration script (the deliverable evaluators run)
+train.py                       Training entry point (reproduces the champion)
+evaluate_checkpoint.py         PSNR/SSIM/LPIPS evaluation on the validation split
+evaluate_baseline.py           Classical bicubic baseline (same metrics)
+evaluate_ensemble.py           Multi-checkpoint/alpha-search ensemble evaluation
+benchmark_inference.py         Load time / latency / throughput / peak-memory benchmark
+export_final_weights.py        Re-exports weights/residualsr_final_ema.pt from the champion checkpoint
+validate_restored_outputs.py   Validates restored_test_outputs/ and writes manifest.json
+generate_submission_assets.py  Regenerates submission/assets/ figures
+
+src/                           Library code (models, losses, dataset, transforms, metrics, TTA, ...)
+tests/                         pytest suite (unit + integration)
+
+weights/residualsr_final_ema.pt   Final packaged inference weights (~2.4 MiB)
+checkpoints/                      Full training checkpoints (NOT in Git; see below)
+restored_test_outputs/            Restored outputs for the official 400-image test set + manifest.json
+results/                          Measured metrics/benchmark JSON (final_metrics.json, final_benchmark.json, ...)
+submission/                       Idea-submission slide content + figures (pipeline/metrics/sample panels)
+EXPERIMENT_LOG.md                 Full experiment history (30 experiments, what worked and what didn't)
+```
+
+## Supported environment
+
+- **Python**: developed and tested with **3.12.10** (Windows). No other
+  Python version has been verified.
+- **PyTorch**: **2.7.1** (`2.7.1+cu128` in the development GPU environment).
+- **CUDA**: used automatically when available
+  (`torch.cuda.is_available()` — no hard-coded GPU index, no
+  platform-specific logic). Development/benchmarking hardware was an
+  **NVIDIA GeForce RTX 4060 Laptop GPU (~8 GB VRAM)** — see
+  [Inference benchmark](#inference-benchmark) for numbers measured on that
+  hardware specifically. The code makes no GPU-model-specific assumptions;
+  it is expected to run on any CUDA device, including a datacenter GPU such
+  as an H100.
+- **CPU fallback**: fully supported. `inference.py`, `evaluate_checkpoint.py`,
+  and `train.py` all fall back to CPU automatically when CUDA is
+  unavailable.
 
 ## Installation
 
-The project is tested with **Python 3.12.13**. Other Python versions have not been verified.
-
-On Windows PowerShell:
+### Windows PowerShell
 
 ```powershell
 python -m venv .venv
@@ -15,7 +79,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-On macOS or Linux:
+### Linux / macOS
 
 ```bash
 python3 -m venv .venv
@@ -24,228 +88,220 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` contains the exact dependency versions used for verification, including pytest for this small repository's development and test workflow.
-
-## Quick Start with Docker
-
-Install Docker Desktop (Windows/macOS) or Docker Engine (Linux). Python and the project dependencies do not need to be installed on the host.
-
-Build the image from the repository root:
+`requirements.txt` is a complete pip-freeze snapshot of the training
+environment. As installed above, `torch`/`torchvision` resolve to their
+**CPU** builds (works everywhere, no GPU required). To use CUDA, install the
+matching CUDA build *before* the step above (pip will then see it already
+satisfied and leave it alone):
 
 ```bash
-docker build -t semicon-restoration .
+pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
 ```
 
-Run the portable unit tests (the image's default command):
+Use the `cuXXX` index matching your CUDA driver (see
+[pytorch.org/get-started](https://pytorch.org/get-started/locally/)) — cu128
+is what the development machine used, not a strict requirement.
 
-```bash
-docker run --rm semicon-restoration
-```
+## Model weights
 
-The dataset is not included in Git or in the Docker image. Download and extract it separately under the repository's `data/` directory using the structure in [Dataset Setup](#dataset-setup), then mount it read-only when running dataset inspection. Mount `results/` as well to persist generated reports on the host.
-
-### Windows PowerShell
-
-```powershell
-docker run --rm `
-  -v "${PWD}/data:/app/data:ro" `
-  -v "${PWD}/results:/app/results" `
-  semicon-restoration `
-  python inspect_dataset.py --data-dir /app/data --results-dir /app/results --max-samples 100
-```
-
-### macOS/Linux
-
-```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  -v "$(pwd)/data:/app/data:ro" \
-  -v "$(pwd)/results:/app/results" \
-  semicon-restoration \
-  python inspect_dataset.py --data-dir /app/data --results-dir /app/results --max-samples 100
-```
-
-The macOS/Linux command uses your host user ID so reports created in the bind-mounted `results/` directory remain editable by your account. Docker Desktop handles bind-mount permissions for the PowerShell command.
-
-Commands after the image name override the default, so other utilities work the same way. For example, `python visualize_samples.py --data-dir /app/data` runs sample visualization. The existing `SEMICON_DATA_DIR` override is also supported; set it with Docker's `-e` option when mounting the dataset somewhere other than `/app/data`.
-
-## Dataset Setup
-
-The full hackathon dataset is not committed to Git and is not required for development or unit testing. Download it separately and extract it without changing its internal structure so it appears under:
+The final submission model is the EMA weights of
+`checkpoints/exp23_ema_extended90/checkpoint_best.pt`, repackaged as a small,
+self-contained, inference-only file:
 
 ```text
-data/Data-public/train/train/NoisyLR/
-data/Data-public/train/train/GT/
-data/Data-public/Test_NoisyLR/NoisyLR/
+weights/residualsr_final_ema.pt   (~2.4 MiB — small enough to track normally in Git)
 ```
 
-The scripts discover the dataset recursively, so `SEMICON_DATA_DIR` may instead point to another directory containing the extracted structure.
-
-## Running Tests
-
-Unit tests create tiny NumPy arrays in pytest temporary directories. They require no external dataset or network access:
+It contains the model's `state_dict` plus every piece of architecture
+metadata needed to reconstruct it (`architecture`, `in_channels`,
+`out_channels`, `num_features`, `num_blocks`, `scale`, and every optional
+ResidualSR variant flag), so **no CLI flags are required** to load it
+correctly. `inference.py` loads this file by default — no path needs to be
+supplied or edited. To regenerate it from the source checkpoint (which is
+never modified):
 
 ```bash
-pytest -m "not integration"
+python export_final_weights.py
 ```
 
-Integration tests exercise the same discovery, loading, geometry, and reporting behavior against the full hackathon dataset. By default they look under `<repository-root>/data`, independently of the current working directory:
+The full training checkpoint (`checkpoints/exp23_ema_extended90/checkpoint_best.pt`,
+~9.7 MiB, includes optimizer/scheduler/EMA state) is excluded from Git by
+`.gitignore` (all of `checkpoints/` is), consistent with every other
+experiment checkpoint in this project — only the small packaged inference
+file is tracked.
+
+## Input format
+
+- Format: **`.npy`**, one file per image.
+- Shape: `[H, W]` — 2D, single channel (no channel axis). NoisyLR is
+  ~`128x128`; GT/restored output is ~`256x256` (exact 2x).
+- dtype: `float32`.
+- Numerical range: **not normalized to `[0,1]`**. Measured NoisyLR values
+  span roughly `[-0.28, 2.16]` (~3.4% of pixels fall outside `[0,1]`); GT
+  values are within `[0,1]` exactly. See
+  [`docs/dataset_notes.md`](docs/dataset_notes.md). The model is fed raw
+  values unchanged (no clipping/normalization anywhere in the pipeline), and
+  its output is likewise raw/unclipped, matching this convention.
+
+## Standalone inference
+
+**One command, no source edits, no dataset/checkpoint path configuration
+required:**
 
 ```bash
-pytest -m integration
+python inference.py --input-dir data/Data-public/Test_NoisyLR/NoisyLR --output-dir restored_test_outputs
 ```
 
-To keep the dataset elsewhere, set `SEMICON_DATA_DIR` to either an absolute path or a path relative to the repository root. For example, in PowerShell:
+- Loads `weights/residualsr_final_ema.pt` automatically.
+- Uses CUDA automatically if available, otherwise CPU.
+- Processes every `.npy` file under `--input-dir` (deterministic, sorted
+  order), writes one `.npy` output per input under `--output-dir` (created
+  automatically if missing), preserving filenames.
+- Requires no ground truth and no training-dataset path.
+- Prints device used, per-file progress, total images processed, total
+  inference time, and average time/image.
 
-```powershell
-$env:SEMICON_DATA_DIR = "D:\datasets\semicon"
-pytest -m integration
-```
-
-On Bash-compatible shells:
-
-```bash
-SEMICON_DATA_DIR=/datasets/semicon pytest -m integration
-```
-
-Run every available test with:
-
-```bash
-pytest
-```
-
-If the full dataset is absent or its structure is invalid, integration tests report a clear skip reason while unit tests continue to run and pass.
-
-## Bicubic Validation Baseline
-
-The first reproducible reference is a classical 2x bicubic interpolation baseline. It uses the existing deterministic NoisyLR-to-GT pairing and splits the pairs into 80% training and 20% validation with seed `42` by default. Only the validation subset is evaluated; the competition test set has no GT and is not used.
-
-```bash
-python evaluate_baseline.py \
-  --data-dir data/Data-public \
-  --val-fraction 0.2 \
-  --seed 42
-```
-
-The command reports PSNR (dB), grayscale SSIM, interpolation-only CPU timing, and throughput, and saves `results/bicubic_baseline.json`. The raw float32 bicubic result is retained unchanged. By default, only the prediction passed to metrics is clipped to `[0,1]`, because GT represents valid intensities in that range; use `--no-clip-prediction` to measure without metric-time clipping.
-
-LPIPS is available through `--lpips` only when a compatible optional PyTorch/LPIPS installation and its pretrained weights are already available. The grayscale metric input is replicated to three channels and mapped from `[0,1]` to `[-1,1]` inside the LPIPS adapter only. The default dependency set intentionally excludes this large, download-dependent stack; if unavailable, the baseline completes and records LPIPS as unavailable rather than failing.
-
-This baseline establishes the performance that future learned restoration models should beat.
-
-## PyTorch Data Pipeline
-
-The lazy PyTorch datasets reuse the repository's canonical discovery and seeded split. They store paths and metadata only; arrays are loaded when a sample is indexed.
-
-```python
-from pathlib import Path
-
-from src.dataset import PairedRestorationDataset, create_dataloader
-from src.dataset_discovery import discover_layout, discover_pairs
-from src.splits import split_pairs
-
-layout = discover_layout(Path("data"))
-pairs = discover_pairs(layout).pairs
-train_pairs, validation_pairs = split_pairs(
-    pairs,
-    val_fraction=0.2,
-    seed=42,
-)
-
-train_dataset = PairedRestorationDataset(train_pairs)
-validation_dataset = PairedRestorationDataset(validation_pairs)
-
-train_loader = create_dataloader(
-    train_dataset,
-    batch_size=8,
-    shuffle=True,
-    seed=42,
-)
-validation_loader = create_dataloader(
-    validation_dataset,
-    batch_size=8,
-    shuffle=False,
-)
-```
-
-Each paired sample contains `input`, `target`, and `filename`. Input tensors are raw NoisyLR `torch.float32` values in `[1,H,W]` format, including legitimate values below 0 or above 1. GT tensors are `torch.float32 [1,2H,2W]`. No clipping, normalization, resizing, cropping, padding, or augmentation occurs.
-
-For competition inputs without GT, construct `RestorationTestDataset(image_files(layout.test_input_dir))`; samples contain only `input` and `filename`. `create_dataloader` supports `batch_size`, `shuffle`, `num_workers`, `pin_memory`, `drop_last`, and an optional shuffle `seed`.
-
-## Training Preprocessing
-
-Training uses a spatially aligned random crop followed by paired geometric augmentation:
+Optional flags:
 
 ```text
-128x128 LR  -> random 64x64 LR crop at (y, x)
-256x256 GT  -> corresponding 128x128 GT crop at (2y, 2x)
-             -> identical paired flips/right-angle rotation
+--checkpoint <path>     Override the model weights (accepts either a packaged
+                        weights/*.pt file or a full train.py checkpoint --
+                        both reconstruct the model with zero extra flags).
+--tta {none,x8}         See "TTA" below. Default: none.
+--device {cuda,cpu}     Override auto-detection.
 ```
 
-```python
-from src.transforms import create_training_transform
-
-training_transform = create_training_transform(
-    crop_size=64,
-    scale=2,
-    augment=True,
-)
-training_dataset = PairedRestorationDataset(
-    train_pairs,
-    scale=2,
-    transform=training_transform,
-)
-
-# Validation stays deterministic and directly comparable with the full-image
-# bicubic baseline: no crop and no augmentation.
-validation_dataset = PairedRestorationDataset(validation_pairs, scale=2)
-```
-
-The default augmentation policy independently applies horizontal and vertical flips with probability 0.5 and uniformly selects a rotation from 0, 90, 180, or 270 degrees. No interpolation is used. There are no intensity changes, clipping, normalization, resizing, padding, or quantization; raw float32 NoisyLR values are preserved.
-
-By default transforms use PyTorch's process-local RNG, which DataLoader workers seed in the standard way. Pass `seed=` or a `torch.Generator` to `create_training_transform` for deterministic single-worker tests or runs. Generator state advances on every access, so a sample is not permanently assigned one crop. Validation should continue using `transform=None` and complete `128x128`/`256x256` images so neural metrics remain comparable with the bicubic PSNR and SSIM baseline.
-
-## Neural Restoration Baseline
-
-The first trainable model is a small residual CNN (`src/models/residual_sr.py`): an
-initial convolution, four residual blocks, a convolution, then `PixelShuffle(2)` to
-produce the 2x output. It has no pretrained weights, no normalization layers, and
-about 85k parameters, so it trains and debugs quickly on CPU. `src/metrics.py`
-provides batched, torch-tensor PSNR/SSIM built directly on the existing bicubic
-baseline's metric functions, so neural and bicubic numbers stay directly comparable.
-
-Train with the canonical seed-42, 2560/640 split:
+Validate the generated outputs and produce a manifest:
 
 ```bash
-python train.py --data-dir data/Data-public --epochs 20 --batch-size 16 --lr 1e-4
+python validate_restored_outputs.py --input-dir data/Data-public/Test_NoisyLR/NoisyLR --output-dir restored_test_outputs
 ```
 
-Device selection defaults to CUDA if available, otherwise CPU, and is printed at
-startup. Every epoch prints train L1, validation L1/PSNR/SSIM, and the established
-bicubic reference (PSNR 23.1413 dB, SSIM 0.550604) for direct comparison. See
-`python train.py --help` for all options (batch size, learning rate, seed, device,
-checkpoint directory, worker count, and `--max-train-samples`/`--max-val-samples`
-subset limits for quick smoke runs).
+## TTA
+
+`--tta x8` runs an 8-way geometric self-ensemble (`src/tta.py`: all
+horizontal/vertical-flip x 90-degree-rotation combinations, averaged) instead
+of a single forward pass. Measured on the canonical validation split:
+
+| Mode | PSNR | SSIM | LPIPS | Mean latency (RTX 4060 Laptop, 128x128 input) | Throughput |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `none` (default) | 27.9893 dB | 0.756916 | 0.302781 | 15.57 ms | 64.24 img/s |
+| `x8` | 28.0355 dB | 0.758519 | 0.309627 | 50.22 ms (**3.23x slower**) | 19.91 img/s |
+
+**`none` is the submission default.** The x8 PSNR/SSIM gain is small
+(+0.046 dB / +0.0016) and LPIPS actually gets very slightly *worse* with x8
+(0.302781 -> 0.309627 — TTA's averaging trades a small amount of perceptual
+sharpness for pixel-fidelity gains), while inference cost more than triples.
+`--tta x8` remains available for evaluators who prefer the marginal accuracy
+gain over throughput. Full numbers: [`results/final_benchmark.json`](results/final_benchmark.json),
+[`results/final_metrics.json`](results/final_metrics.json).
+
+## Training
+
+Reproduce the final champion configuration from scratch (seed 42, ~90
+epochs on an RTX 4060 Laptop GPU):
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 --epochs 90 --checkpoint-dir checkpoints/exp23_ema_extended90
+```
+
+This is the exact recipe recorded for Experiment 23 in
+[EXPERIMENT_LOG.md](EXPERIMENT_LOG.md) (itself a continuation of Experiments
+6/15/16/19-21 — see that file for the full lineage and every rejected
+alternative). `python train.py --help` documents every option, including
+several optional/experimental variants (channel attention, multi-scale and
+dense-block variants, hard-patch sampling, a denoising stem, alternative
+losses) that are **not** part of the submission champion — see
+EXPERIMENT_LOG.md's "Next-Experiment Priority Order" for their status.
 
 A tiny smoke run that only verifies the pipeline (not real training):
 
 ```bash
-python train.py --epochs 1 --max-train-samples 16 --max-val-samples 8 --checkpoint-dir checkpoints
+python train.py --epochs 1 --max-train-samples 16 --max-val-samples 8 --checkpoint-dir /tmp/smoke
 ```
 
-Checkpoints are written to `--checkpoint-dir` (default `checkpoints/`, already
-excluded from Git by `.gitignore`) as `checkpoint_latest.pt` (every epoch) and
-`checkpoint_best.pt` (kept whenever validation PSNR improves). Each checkpoint
-stores the model and optimizer state, epoch, best validation PSNR, and the model
-and training configuration needed to reconstruct it.
-
-Evaluate a saved checkpoint against the fixed validation split:
+## Validation / evaluation
 
 ```bash
-python evaluate_checkpoint.py --checkpoint checkpoints/checkpoint_best.pt --data-dir data/Data-public
+python evaluate_checkpoint.py --checkpoint checkpoints/exp23_ema_extended90/checkpoint_best.pt --tta none --lpips
+python evaluate_checkpoint.py --checkpoint checkpoints/exp23_ema_extended90/checkpoint_best.pt --tta x8 --lpips
 ```
 
-This reconstructs the model from the checkpoint's stored configuration, evaluates
-the deterministic validation split, and prints L1/PSNR/SSIM alongside the bicubic
-baseline and the delta versus it. It does not run inference on the competition
-test set.
+Reports L1/PSNR/SSIM (`src/metrics.py`, identical formulas/clipping
+convention to the bicubic baseline) plus optional LPIPS
+(`--lpips`; requires the `lpips` package and its pretrained weights, listed
+in `requirements.txt`; grayscale is replicated to 3 channels and mapped from
+`[0,1]` to `[-1,1]` for the LPIPS network — see
+`src/baseline.py::lpips_input_tensor`). LPIPS runs as a strictly separate,
+additive pass and never changes the PSNR/SSIM numbers. Bicubic reference:
+
+```bash
+python evaluate_baseline.py --data-dir data/Data-public --val-fraction 0.2 --seed 42 --lpips
+```
+
+## Final metrics
+
+Measured on the canonical 640-image validation split (seed 42,
+`val_fraction=0.2`), independently reproduced during this submission audit —
+see [`results/final_metrics.json`](results/final_metrics.json) and
+[`submission/assets/metrics.png`](submission/assets/metrics.png):
+
+| | PSNR (dB, higher better) | SSIM (higher better) | LPIPS (lower better) |
+| --- | ---: | ---: | ---: |
+| Bicubic | 23.1413 | 0.550604 | 0.4242 |
+| ResidualSR (raw) | 27.9893 | 0.756916 | 0.3028 |
+| ResidualSR + x8 TTA | **28.0355** | **0.758519** | 0.3096 |
+
+Improvement over bicubic: **+4.8480 dB** PSNR (raw), **+4.8942 dB** (x8).
+
+## Test output generation
+
+```bash
+python inference.py --input-dir data/Data-public/Test_NoisyLR/NoisyLR --output-dir restored_test_outputs
+python validate_restored_outputs.py --input-dir data/Data-public/Test_NoisyLR/NoisyLR --output-dir restored_test_outputs
+```
+
+Produces 400 `.npy` outputs (one per official test input) plus
+`restored_test_outputs/manifest.json`. The official test set has no locally
+available ground truth, so no PSNR/SSIM/LPIPS is computed for it — see
+`manifest.json`'s validation fields (shape/dtype/finiteness/count) instead.
+`restored_test_outputs/` is ~102 MiB total (400 files x ~256 KiB); it is
+included in this repository as generated, but regenerating it with the one
+command above takes under 10 seconds on the development GPU if a smaller
+clone is preferred.
+
+## Reproducibility
+
+- Split seed: **42** (`src/splits.py::split_pairs`, `val_fraction=0.2` ->
+  2,560 train / 640 validation), used identically for training, evaluation,
+  and the bicubic baseline.
+- `train.py` seeds `random`/`numpy`/`torch` (and `torch.cuda`) from
+  `--seed` (default 42).
+- Every checkpoint stores its full `model_config`/`training_config`/
+  `loss_config`/`scheduler_config`/`ema_config`, so `--resume` reconstructs
+  an interrupted run's exact state (see `train.py::load_checkpoint_for_resume`).
+
+## Inference benchmark
+
+```bash
+python benchmark_inference.py
+```
+
+Measures model load time and, for both `--tta none` and `--tta x8`: mean/
+median/min/max latency, throughput, and peak CUDA memory (warm-up iterations
+run first; `torch.cuda.synchronize()` brackets every timed region). Writes
+[`results/final_benchmark.json`](results/final_benchmark.json) and a Markdown
+summary. **Numbers are specific to the machine the script runs on** — see
+[TTA](#tta) above for the RTX 4060 Laptop GPU numbers this repository ships
+with; re-run on any other machine (including an H100) for numbers specific
+to it.
+
+## License / acknowledgment
+
+No license file is currently present in this repository. This project was
+built for the KLA / i4C hackathon's **AI-Based Restoration of Degraded
+Images** problem statement; add a license before any public release beyond
+the hackathon submission if one is required by its rules.

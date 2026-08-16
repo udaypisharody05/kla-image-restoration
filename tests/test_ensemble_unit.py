@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 from evaluate_checkpoint import load_model
-from evaluate_ensemble import validate_ensemble
+from evaluate_ensemble import alpha_grid, run_alpha_search, validate_ensemble, validate_ensemble_n
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import ImagePair
 from src.ensemble import weighted_average_predictions
@@ -228,3 +228,108 @@ def test_evaluate_ensemble_cli_exists_with_expected_flags() -> None:
     assert "--weight-a" in result.stdout
     assert "--weight-b" in result.stdout
     assert "--tta {none,x8}" in result.stdout
+
+
+def test_evaluate_ensemble_cli_exposes_n_checkpoint_and_alpha_search_flags() -> None:
+    result = subprocess.run(
+        [sys.executable, "evaluate_ensemble.py", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "--checkpoints" in result.stdout
+    assert "--weights" in result.stdout
+    assert "--alpha-search" in result.stdout
+    assert "--alpha-step" in result.stdout
+
+
+# --- N-way prediction averaging (Phase 7/8: validate_ensemble_n) ---
+
+
+def test_validate_ensemble_n_matches_validate_ensemble_for_two_models(tmp_path: Path) -> None:
+    loader = _tiny_validation_loader(tmp_path)
+    model_a = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    model_b = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    two_model_metrics = validate_ensemble(
+        model_a, model_b, loader, [0.5, 0.5], nn.L1Loss(), torch.device("cpu"), tta="none"
+    )
+    n_way_metrics = validate_ensemble_n(
+        [model_a, model_b], loader, [0.5, 0.5], nn.L1Loss(), torch.device("cpu"), tta="none"
+    )
+    assert n_way_metrics["psnr"] == pytest.approx(two_model_metrics["psnr"])
+    assert n_way_metrics["ssim"] == pytest.approx(two_model_metrics["ssim"])
+    assert n_way_metrics["loss"] == pytest.approx(two_model_metrics["loss"])
+
+
+def test_validate_ensemble_n_supports_three_models(tmp_path: Path) -> None:
+    loader = _tiny_validation_loader(tmp_path)
+    models = [ResidualSRNet(num_features=4, num_blocks=1, scale=2) for _ in range(3)]
+    metrics = validate_ensemble_n(
+        models, loader, [1.0, 1.0, 1.0], nn.L1Loss(), torch.device("cpu"), tta="none"
+    )
+    assert math.isfinite(metrics["psnr"])
+    assert math.isfinite(metrics["ssim"])
+
+
+def test_validate_ensemble_n_rejects_single_model(tmp_path: Path) -> None:
+    loader = _tiny_validation_loader(tmp_path)
+    model = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    with pytest.raises(ValueError, match="at least 2"):
+        validate_ensemble_n([model], loader, [1.0], nn.L1Loss(), torch.device("cpu"))
+
+
+# --- Alpha grid search (Phase 8: run_alpha_search) ---
+
+
+def test_alpha_grid_default_step_covers_0_to_1_inclusive() -> None:
+    grid = alpha_grid(0.05)
+    assert grid[0] == 0.0
+    assert grid[-1] == 1.0
+    assert len(grid) == 21  # 0.00, 0.05, ..., 1.00
+
+
+def test_alpha_grid_rejects_invalid_step() -> None:
+    with pytest.raises(ValueError):
+        alpha_grid(0.0)
+    with pytest.raises(ValueError):
+        alpha_grid(1.5)
+
+
+def test_run_alpha_search_reports_both_raw_models_and_a_best_alpha(tmp_path: Path) -> None:
+    loader = _tiny_validation_loader(tmp_path)
+    model_a = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    model_b = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    result = run_alpha_search(
+        model_a, model_b, loader, nn.L1Loss(), torch.device("cpu"), tta="none", step=0.25
+    )
+    assert set(result.keys()) == {
+        "raw_a", "raw_b", "stronger_name", "stronger_psnr", "grid", "best", "accepted",
+    }
+    assert result["stronger_name"] in ("A", "B")
+    assert len(result["grid"]) == 5  # 0.00, 0.25, 0.50, 0.75, 1.00
+    assert result["best"]["psnr"] == max(entry["psnr"] for entry in result["grid"])
+
+
+def test_run_alpha_search_alpha_one_reproduces_raw_model_a(tmp_path: Path) -> None:
+    """alpha=1.0 in the grid must be pure model A -- ties the grid computation
+    directly to validate_ensemble/raw single-model evaluation."""
+    loader = _tiny_validation_loader(tmp_path)
+    model_a = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    model_b = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    result = run_alpha_search(
+        model_a, model_b, loader, nn.L1Loss(), torch.device("cpu"), tta="none", step=0.5
+    )
+    alpha_one_entry = next(entry for entry in result["grid"] if entry["alpha"] == pytest.approx(1.0))
+    assert alpha_one_entry["psnr"] == pytest.approx(result["raw_a"]["psnr"], rel=1e-5)
+
+
+def test_run_alpha_search_rejects_when_no_alpha_beats_the_stronger_model(tmp_path: Path) -> None:
+    """Identical models: the ensemble at any alpha equals both raw models
+    exactly, so it can never be STRICTLY better -- must be rejected."""
+    loader = _tiny_validation_loader(tmp_path)
+    torch.manual_seed(0)
+    model_a = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    model_b = ResidualSRNet(num_features=4, num_blocks=1, scale=2)
+    model_b.load_state_dict(model_a.state_dict())  # identical weights
+    result = run_alpha_search(
+        model_a, model_b, loader, nn.L1Loss(), torch.device("cpu"), tta="none", step=0.5
+    )
+    assert result["accepted"] is False

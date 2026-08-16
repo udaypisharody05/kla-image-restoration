@@ -4126,6 +4126,626 @@ protected champion (Experiment 23, 28.0355 dB / 0.758519 / 0.032264).
 
 ---
 
+# Experiment 26 — ResidualSR Ablation Toolkit (infrastructure only, no results yet)
+
+## Status
+
+**PLANNED / PREPARED.** Eight independently-selectable capabilities were added
+to the training pipeline so each can be ablated on its own against the
+Experiment 23 champion (`checkpoints/exp23_ema_extended90/checkpoint_best.pt`,
+EMA e90 + x8 TTA: **28.0355 dB / 0.758519 / 0.032264**). ResidualSR is
+unchanged as the default architecture; every capability below defaults off
+and reproduces historical behavior exactly unless explicitly requested.
+**No real ablation training run has been started** — this section documents
+capability and reproducible commands only, per instruction; no results are
+reported here.
+
+## What's new
+
+1. **`--loss mixed --mixed-loss-alpha 0.5`** (`src/losses.py::MixedL1MSELoss`)
+   — `alpha*L1 + (1-alpha)*MSE`, default `alpha=0.5`. Existing `--loss l1`
+   (default) / `mse` / `charbonnier` / `l1_ssim` unchanged.
+2. **`--finetune-from <checkpoint>`** (`train.py::load_weights_for_finetune`)
+   — loads model weights only (prefers EMA weights when present) and starts
+   a brand-new experiment: fresh optimizer/`--lr`/scheduler, epoch counter
+   reset to 1, its own best-score tracking, its own `--checkpoint-dir`.
+   Distinct from `--resume` (restores full training state to continue the
+   *same* run); the two are mutually exclusive
+   (`train.py::validate_finetune_args`), and a fine-tuning run is rejected
+   if `--checkpoint-dir` would be the same directory as the source
+   checkpoint's, so the source can never be overwritten.
+3. **`--global-bicubic-residual`** (`train.py::resolve_model_architecture`)
+   — `prediction = bicubic_upsample(LR) + learned_residual(LR)`. Reuses
+   Experiment 17's already-implemented, already-tested
+   `ResidualSRBicubic` (`src/models/residual_sr_bicubic.py`) rather than a
+   new implementation; just a convenience mapping from `--model residual_sr`
+   onto it. Rejects being combined with any architecture other than
+   `residual_sr`/`residual_sr_bicubic`, rather than silently ignoring it.
+4. **Configurable crop size (`--crop-size`)** — already existed and is
+   already thoroughly tested at 64 (default), 96 (Experiment 6), and 128 =
+   full LR image (Experiment 7); see `tests/test_transforms_unit.py`. No
+   changes made here; verified still passing.
+5. **`--channel-attention --attention-reduction 8`**
+   (`src/models/attention.py::ChannelAttention`, wired into
+   `src/models/residual_sr.py::ResidualBlock`) — squeeze-and-excitation gate
+   (global-avg-pool → 1×1 reduce → ReLU → 1×1 expand → sigmoid → channel-wise
+   multiply) optionally inserted into each residual block. Default off
+   constructs no attention submodule at all — zero parameter/state-dict
+   change from before this existed.
+6. **`--multiscale-block`**
+   (`src/models/residual_sr.py::MultiScaleBlock`) — local 3×3 branch +
+   dilated 3×3 (dilation=2) branch, concatenated and fused with a single 1×1
+   convolution before the residual add, replacing `ResidualBlock` when
+   requested. No 5×5 kernel. Independent of `--channel-attention` (neither
+   auto-enables the other; each has its own dedicated tests proving the
+   other stays off).
+7. **Experiment isolation** — every capability is a separate CLI flag with
+   its own `--checkpoint-dir`; none are combined by default.
+8. **Backward compatibility** — `build_model_config`/checkpoint `model_config`
+   only gain new keys (`channel_attention`, `attention_reduction`,
+   `multiscale_block`) when actually requested (mirrors how the
+   `"architecture"` key itself only appears for non-default architectures),
+   so a plain `--model residual_sr` run with none of these flags produces the
+   byte-identical dict every historical checkpoint has, and every existing
+   checkpoint (Experiments 1–25) remains loadable and resumable unmodified.
+
+## Parameter counts (64F/8B — the champion capacity)
+
+| variant | trainable params | vs. baseline |
+| --- | ---: | ---: |
+| ResidualSR (baseline, unchanged) | 630,724 | — |
+| ResidualSR + channel attention (reduction=8) | 639,492 | +8,768 (+1.4%) |
+| ResidualSR + multi-scale block | 696,772 | +66,048 (+10.5%) |
+
+## Tests
+
+122 new tests: mixed-loss formula/construction/backward-pass
+(`tests/test_losses_unit.py`), channel-attention/multi-scale-block
+shape/finiteness/backward-pass/independent-selectability/backward-compat
+(`tests/test_model_unit.py`), and fine-tune-vs-resume
+semantics/`--global-bicubic-residual` mapping (new
+`tests/test_finetune_unit.py`). Full fast suite: **617 passed, 8 deselected**
+(up from 560).
+
+## CLI-wiring smoke checks (not real training; deleted afterward)
+
+One-epoch, 8-train/4-val runs at 8F/2B confirmed the full
+CLI→model→train→checkpoint path for each new flag (`--loss mixed`,
+`--global-bicubic-residual`, `--channel-attention`, `--multiscale-block`),
+plus a fine-tune run from the real Experiment 23 champion checkpoint
+(`--finetune-from checkpoints/exp23_ema_extended90/checkpoint_best.pt --loss
+mse --lr 1e-5`) that correctly loaded its EMA weights (one-epoch tiny-batch
+Val PSNR 27.83 dB, consistent with starting from the champion's 27.99 dB
+rather than random init) and left the source checkpoint file byte-identical
+(SHA-256 verified before/after). Both `validate_finetune_args` guards
+(`--resume`+`--finetune-from` together; `--checkpoint-dir` equal to the
+source's directory) were confirmed to reject with a clear error.
+
+## Proposed ablation commands (A–H; none run yet)
+
+Each uses a separate `checkpoints/exp26_*` directory. `<BEST>` =
+`checkpoints/exp23_ema_extended90/checkpoint_best.pt`, the current champion.
+
+**A. Baseline ResidualSR** (already the champion; re-stated for reference)
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 --epochs 90 --checkpoint-dir checkpoints/exp23_ema_extended90
+```
+
+**B. ResidualSR + MSE fine-tuning** (`--num-features`/`--num-blocks` must
+match `<BEST>`'s 64F/8B -- they default to 32/4, so omitting them here would
+fail to load the checkpoint's weights with a shape mismatch)
+```bash
+python train.py --finetune-from <BEST> --num-features 64 --num-blocks 8 \
+  --loss mse --lr 1e-5 --epochs 10 --checkpoint-dir checkpoints/exp26_finetune_mse
+```
+
+**C. ResidualSR + mixed-loss fine-tuning**
+```bash
+python train.py --finetune-from <BEST> --num-features 64 --num-blocks 8 \
+  --loss mixed --mixed-loss-alpha 0.5 --lr 1e-5 \
+  --epochs 10 --checkpoint-dir checkpoints/exp26_finetune_mixed
+```
+
+**D. ResidualSR + bicubic residual** (from scratch, champion recipe otherwise)
+```bash
+python train.py --model residual_sr --global-bicubic-residual \
+  --num-features 64 --num-blocks 8 --loss l1 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/exp26_bicubic_residual
+```
+
+**E. ResidualSR + 96 crop** (from scratch, champion recipe otherwise)
+```bash
+python train.py --model residual_sr --crop-size 96 \
+  --num-features 64 --num-blocks 8 --loss l1 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/exp26_crop96
+```
+*(Note: the champion recipe already trains at `--crop-size 96`; this row is
+here for completeness/explicitness of the ablation matrix.)*
+
+**F. ResidualSR + full 128 crop** (from scratch, champion recipe otherwise)
+```bash
+python train.py --model residual_sr --crop-size 128 \
+  --num-features 64 --num-blocks 8 --loss l1 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/exp26_crop128_full
+```
+
+**G. ResidualSR + channel attention** (from scratch, champion recipe otherwise)
+```bash
+python train.py --model residual_sr --channel-attention --attention-reduction 8 \
+  --num-features 64 --num-blocks 8 --loss l1 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/exp26_channel_attention
+```
+
+**H. ResidualSR + multi-scale block** (from scratch, champion recipe otherwise)
+```bash
+python train.py --model residual_sr --multiscale-block \
+  --num-features 64 --num-blocks 8 --loss l1 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/exp26_multiscale_block
+```
+
+Each proposed run's result should be compared independently against the
+Experiment 23 champion (28.0355 dB / 0.758519 / 0.032264) with
+`evaluate_checkpoint.py --checkpoint <dir>/checkpoint_best.pt --tta x8`.
+
+## Result
+
+**B and C ran; both REJECTED (trail the champion). D–H have not been started.**
+
+Real fine-tuning runs exist on disk (`checkpoints/exp26_finetune_mixed/`,
+`checkpoints/exp26_finetune_mse/`) and were independently re-measured with
+`evaluate_checkpoint.py` (not just read from checkpoint metadata):
+
+| variant | epoch | Val PSNR (non-TTA) | Val SSIM (non-TTA) | Val PSNR (x8 TTA) |
+| --- | ---: | ---: | ---: | ---: |
+| **B — MSE fine-tune** | 8 | 27.8966 dB | 0.754295 | not measured |
+| **C — Mixed L1+MSE fine-tune** | 23 | 27.9527 dB | 0.756677 | 28.0027 dB |
+| Champion (Exp 23 + x8 TTA, for reference) | 90 | 27.9893 dB | 0.756916 | **28.0355 dB** |
+
+Both trail the champion at every measured comparison point (B by -0.0927 dB
+non-TTA; C by -0.0366 dB non-TTA, -0.0328 dB at x8 TTA). Consistent with the
+project's prior finding that pure MSE underperforms (Experiment 8) and that
+mixed L1+MSE is a smaller, gentler version of the same issue — MSE-leaning
+objectives have not beaten L1 at this checkpoint's convergence point in this
+project. **Rejected; do not extend B or C further.**
+
+**Caveat — B and C were run at `--crop-size 64` (the CLI default), not the
+champion's `--crop-size 96`,** because the commands documented above for B/C
+never pass `--crop-size` explicitly (unlike D–H, which do). This means B/C
+are not a clean single-variable ablation against the champion (loss changed
+*and* crop size reverted to 64) — a confound worth closing before drawing
+strong conclusions about the loss change specifically. Re-running B/C with
+`--crop-size 96` added is the cleaner comparison if this is revisited; not
+done here since both already trail the champion even with the confound
+working in a less-clear direction, and GPU time is limited.
+
+**G — channel attention has an incomplete/invalid artifact on disk,
+`checkpoints/exp27_channel_attention/`, and it must not be used as an
+ablation result.** Inspecting its checkpoint metadata: only 10 epochs
+completed (not the planned 90), `crop_size=64` (not the champion's 96, same
+missing-flag issue as B/C above), and `best_val_psnr=21.37` -- far below
+every other model in this project. This is consistent with an EMA shadow
+(`decay=0.999`) still very close to its random initialization after only 10
+epochs, not evidence that channel attention hurts. **Treat this checkpoint
+directory as a stray/incomplete artifact, not a completed Experiment G.** The
+command in the table above (G, with `--crop-size 96 --epochs 90` as written)
+is the correct one to actually run.
+
+---
+
+# Experiment 27 — Variance-Weighted L1 Loss (infrastructure, no results yet)
+
+## Status
+
+**PLANNED / PREPARED.** Implementation and unit tests are complete. **No
+real training run has been started.**
+
+## Motivation
+
+This is the direct implementation of Experiment 22's forensics report's
+**highest-ranked, previously-untried** recommendation (see
+`results/degradation_analysis/degradation_report.md`, "Ranked strategies for
+Experiment 22", item 1, "expected payoff: HIGH"): *"weight the existing L1 by
+1/√var(I) using the fitted coefficients."* Experiments 24 (synthetic noise
+substitution) and 25 (noise conditioning) both respond to the same
+signal-dependent-noise finding via different mechanisms (augmenting the input
+distribution, and giving the model an explicit sigma channel, respectively);
+this is a third, independent, previously-untried response that changes only
+the loss function.
+
+## Implementation
+
+`src/losses.py::VarianceWeightedL1Loss` -- `mean(weight * |pred - target|)`
+where `weight = (1/(sigma(I) + eps))`, normalized so `mean(weight) == 1`
+per batch (keeps the loss on the same numeric scale as plain L1, so existing
+`--lr` values remain sensible). `sigma(I)` reuses
+`src.synthetic_noise.noise_sigma`/`VARIANCE_COEFFICIENTS` -- the exact
+Experiment 22 fit, not a re-derived one. `I` is estimated from the *target*
+(HR GT), clamped to `[0,1]`, since that is the space this loss operates in --
+a documented approximation of a law that was fit in *LR* space (see the
+docstring in `src/losses.py` for the full caveat). Exposed as
+`--loss weighted_l1`, with `--weighted-l1-eps` (default `1e-2`) and
+`--weighted-l1-variance-floor` (default `0.0`, reproduces the fitted model
+exactly). Integrates through the existing `build_loss_config`/`build_loss`/
+`loss_label` dispatch (`src/losses.py`) exactly like `charbonnier`/`mixed`,
+so no special-casing was added to `train.py`'s training loop, checkpointing,
+or resume logic -- the existing generic `loss_config` dict-equality resume
+check already covers it.
+
+## Tests
+
+18 new tests in `tests/test_losses_unit.py` covering: the mathematical
+formula against a from-scratch reference computation, identical-input ->
+zero loss, weight normalization (verified against plain L1 on a
+uniform-intensity image, where normalization forces every weight to exactly
+1), that error concentrated in a low-intensity region is weighted more than
+the identical error concentrated in a high-intensity region (same target, so
+an identical weight map, isolating where the error sits), finite
+gradients/backward pass, finiteness for out-of-`[0,1]`-range values (real
+NoisyLR/GT are not strictly bounded), rejection of non-positive `eps`, and
+`build_loss_config`/`build_loss`/`loss_label` wiring. Full fast suite: to be
+re-measured; see the top-level test run in this update for the current total.
+
+## CUDA / wiring sanity
+
+Verified via the existing `--loss` dispatch path exercised by
+`tests/test_losses_unit.py`'s backward-pass tests (CPU, `requires_grad`
+tensors, finite gradients). No dedicated CUDA smoke run was performed for
+this loss alone since it changes nothing about the model, optimizer,
+scheduler, or EMA machinery Exp 24/25 already CUDA-sanity-checked -- only the
+per-pixel loss weighting.
+
+## Proposed command
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss weighted_l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 --epochs 90 --checkpoint-dir checkpoints/exp27_weighted_l1
+```
+
+Compare with `evaluate_checkpoint.py --checkpoint
+checkpoints/exp27_weighted_l1/checkpoint_best.pt --tta x8` against the
+protected champion (Experiment 23, 28.0355 dB / 0.758519 / 0.032264).
+
+## Result
+
+**TBD.** No real training run has been started.
+
+---
+
+# Experiment 28 — Hard-Patch / Informative-Patch Sampling (infrastructure, no results yet)
+
+## Status
+
+**PLANNED / PREPARED.** Implementation and unit tests are complete. **No
+real training run has been started.**
+
+## Motivation
+
+Standard `PairedRandomCrop` samples training crop origins uniformly at
+random. This optionally biases sampling toward higher-gradient-energy
+("harder"/more informative) regions of each training image, on the premise
+that more training signal per step may come from edges/texture than from
+flat regions -- while still mixing in plain random crops so training is
+never restricted to only high-gradient areas.
+
+## Implementation
+
+`src/transforms.py::gradient_energy_map` (a simple central-difference
+|dx|+|dy| proxy for local high-frequency content) +
+`sample_informative_crop_origin` (weighted-random sampling over every legal
+crop origin, weights proportional to that origin's window's summed gradient
+energy, computed in `O(H*W)` via a 2D prefix-sum/integral-image table rather
+than one pass per candidate origin) + `PairedHardPatchCrop` (applies it, then
+delegates to the existing `aligned_paired_crop` -- the same alignment
+primitive `PairedRandomCrop` uses, so LR/GT can never desynchronize) +
+`PairedMixedCrop` (per-sample Bernoulli mixture: probability
+`hard_patch_prob` -- default `0.5` -- uses the informative crop, otherwise
+falls back to plain `PairedRandomCrop`). `create_training_transform` gains
+`hard_patch_sampling`/`hard_patch_prob` parameters (default
+`hard_patch_sampling=False`, byte-for-byte the historical
+`PairedRandomCrop`-only pipeline). `train.py` gains `--hard-patch-sampling`
+and `--hard-patch-prob` (default `0.5`), threaded through `build_datasets`,
+recorded in `training_config`, and checked (warn, not reject -- same policy
+as `--crop-size`) on resume via an extended `warn_on_resume_config_mismatch`.
+
+Sampling is *weighted-random*, not a deterministic argmax: a flat +1e-6
+floor keeps every legal origin sampleable even in a perfectly flat window, so
+the same image can still yield different informative crops across epochs
+(via the shared generator's advancing state) rather than always picking the
+identical best window.
+
+## Tests
+
+16 new tests in `tests/test_hard_patch_unit.py`: gradient-energy-map
+correctness on flat/edge images, in-bounds sampling over many seeds,
+statistical bias toward a synthetic high-energy region (vs. a uniform-random
+baseline), no crash/NaN on a fully flat image, exact 2x LR/GT alignment
+(both `PairedHardPatchCrop` alone and all three `PairedMixedCrop` probability
+settings), deterministic reproducibility given the same seed (single crop,
+a 20-call sequence, and via `create_training_transform`'s `seed=` parameter),
+`hard_patch_prob=0.0` never invoking informative sampling (verified by
+monkeypatching it to raise), `hard_patch_prob=1.0` always invoking it (call
+count verified), `hard_patch_prob=0.5` invoking both branches roughly
+proportionally, full-image and oversized-crop boundary behavior identical to
+`PairedRandomCrop`, and in-bounds crop origins over many seeds on a
+synthetic high-energy image. All existing `tests/test_transforms_unit.py`
+(37 tests) and `tests/test_transforms_integration.py`/
+`tests/test_training_unit.py` pass unchanged, confirming
+`hard_patch_sampling=False` (the default) leaves the historical pipeline
+untouched.
+
+## CLI-wiring smoke check (not real training; deleted afterward)
+
+`--loss weighted_l1 --hard-patch-sampling --hard-patch-prob 0.5
+--denoise-stem --denoise-stem-blocks 2`, 1 epoch, 8 train / 4 val samples,
+8-feature/2-block model: ran to completion, printed
+`Hard-patch sampling: enabled (prob=0.5)`, finite loss/PSNR/SSIM, checkpoint
+saved and loadable. Checkpoint directory deleted after verification.
+
+## Proposed command
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 --hard-patch-sampling --hard-patch-prob 0.5 \
+  --epochs 90 --checkpoint-dir checkpoints/exp28_hard_patch
+```
+
+## Result
+
+**TBD.** No real training run has been started.
+
+---
+
+# Experiment 29 — Degradation-Aware Denoising Stem (infrastructure, no results yet)
+
+## Status
+
+**PLANNED / PREPARED.** Implementation and unit tests are complete. **No
+real training run has been started.**
+
+## Justification (per project instructions: implement only if forensics support it)
+
+Experiment 22 found the NoisyLR corruption is dominated by meaningful,
+strongly signal-dependent noise (residual std 0.0897, ~2.8x the champion's
+validation L1) with negligible blur (best Gaussian sigma 0.4, only 0.328%
+MSE gain) and no fixed pattern (ratio 1.01) -- i.e. "meaningful noise before
+upsampling" in the sense that justifies trying an explicit pre-trunk
+denoising stage. This is offered as an *additional*, independently-selectable
+mechanism alongside Experiment 25's noise-conditioning channel (which
+responds to the same finding differently, by giving the model an explicit
+sigma estimate rather than trying to remove noise before the trunk) -- not a
+replacement for it; the two are orthogonal and can in principle be combined
+later if both help individually.
+
+## Implementation
+
+`src/models/denoise_stem.py::DenoiseStem` -- `Conv3x3 -> {2..4} x
+SimpleGateBlock -> Conv3x3`, applied as a residual correction
+(`output = input + stem(input)`) before `ResidualSRNet.conv_in`.
+`SimpleGateBlock` is a simplified-NAFNet-style block (channel-doubling conv
+-> element-wise "simple gate" a*b -> conv, no LayerNorm, no attention, no
+multi-stage encoder/decoder) per the project's explicit preference for a
+lightweight gated block over a full NAFNet. Wired into `ResidualSRNet` via
+`denoise_stem`/`denoise_stem_features`/`denoise_stem_blocks` (all default
+off/32/2), following the exact same "no submodule constructed at all unless
+requested" convention as `channel_attention`/`multiscale_block`, and into
+`build_model_config`/`build_model` (`src/models/__init__.py`) the same way.
+`train.py` gains `--denoise-stem`, `--denoise-stem-features` (default `32`),
+`--denoise-stem-blocks` (default `2`, 2-4 recommended per the spec).
+
+## Parameter counts (64F/8B -- the champion capacity)
+
+| variant | trainable params | vs. baseline |
+| --- | ---: | ---: |
+| ResidualSR (baseline, unchanged) | 630,724 | -- |
+| ResidualSR + denoise stem (32 features, 2 blocks) | 686,821 | +56,097 (+8.9%) |
+
+Modest growth, as instructed.
+
+## Tests
+
+12 new tests in `tests/test_model_unit.py`: `SimpleGateBlock` shape/
+finiteness/backward pass, `DenoiseStem` shape preservation for both
+`in_channels=1` (real LR) and `in_channels=2` (compatibility with
+Experiment 25's noise-conditioning wrapper, which concatenates a sigma
+channel), rejection of non-positive `num_blocks`, backward pass, default
+construction unaffected (`model.stem is None` when disabled), forward shape
+and modest (<25%) parameter growth when enabled, `build_model_config`/
+`build_model` wiring (keys omitted when disabled, included when enabled,
+legacy configs still build a stemless model), and explicit combination with
+`--rdb-block` (independent mechanisms, not mutually exclusive).
+
+## CLI-wiring smoke check (not real training; deleted afterward)
+
+Same combined smoke check as Experiment 28 above (`--denoise-stem
+--denoise-stem-blocks 2` alongside `--loss weighted_l1
+--hard-patch-sampling`): ran to completion, model config printed
+`'denoise_stem': True, 'denoise_stem_features': 32, 'denoise_stem_blocks': 2`,
+finite loss/PSNR/SSIM. Checkpoint directory deleted after verification.
+
+## Proposed command
+
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 --denoise-stem --denoise-stem-blocks 2 \
+  --epochs 90 --checkpoint-dir checkpoints/exp29_denoise_stem
+```
+
+## Result
+
+**TBD.** No real training run has been started.
+
+---
+
+# Experiment 30 — Lightweight Residual Dense Block (Phase 10, infrastructure, no results yet)
+
+## Status
+
+**PLANNED / PREPARED.** Implementation and unit tests are complete. **No
+real training run has been started.**
+
+## Motivation
+
+An optional third residual-block alternative (alongside `ResidualBlock` and
+Experiment 26's `MultiScaleBlock`), inspired by RDN (Zhang et al. 2018) but
+deliberately not a full RDN -- a single dense-connectivity block dropped into
+the existing trunk, reusing `ResidualSRNet`'s stem and upsampling head
+unchanged, per the project's instruction not to require broad refactoring.
+
+## Implementation
+
+`src/models/residual_sr.py::ResidualDenseBlock` -- `num_layers` (default 3)
+3x3 convolutions, each seeing the concatenation of the block's input and
+every previous layer's output (dense feature reuse), a 1x1 local-feature-
+fusion convolution back down to `num_features`, and a residual add. A small
+`growth_rate` (default 16, channels added per layer) keeps the concatenated
+channel count -- and therefore the parameter count -- modest. Wired into
+`ResidualSRNet` via `rdb_block`/`rdb_growth_rate`/`rdb_num_layers` (default
+off/16/3), mutually exclusive with `multiscale_block` (both replace the
+residual block type; `ResidualSRNet.__init__` raises `ValueError` if both are
+requested), but independently composable with `channel_attention` and
+`denoise_stem` (both orthogonal mechanisms). `--rdb-block`,
+`--rdb-growth-rate`, `--rdb-num-layers` added to `train.py`; wired through
+`build_model_config`/`build_model` the same way as every other optional
+variant.
+
+## Parameter counts (64F/8B -- the champion capacity)
+
+| variant | trainable params | vs. baseline |
+| --- | ---: | ---: |
+| ResidualSR (baseline, unchanged) | 630,724 | -- |
+| ResidualSR + RDB blocks (growth_rate=16, 3 layers) | 374,596 | **-256,128 (-40.6%)** |
+
+Notably *smaller* than the baseline, not larger -- dense feature reuse needs
+less raw per-layer width to represent similar capacity, comfortably clearing
+the spec's "<1M parameters" target with headroom for a larger `growth_rate`
+if a first run shows underfitting.
+
+## Tests
+
+15 new tests in `tests/test_model_unit.py`: shape/finiteness, default-off
+attention submodule + optional attention composition, backward pass, dense
+channel growth verified layer-by-layer (`layers[i].in_channels`), rejection
+of non-positive `growth_rate`/`num_layers`, forward shape through the full
+`ResidualSRNet`, the <1M-parameter assertion at champion capacity, backward
+pass through the full model, mutual exclusivity with `--multiscale-block`
+(raises `ValueError`), `build_model_config`/`build_model` key-presence
+wiring (omitted when disabled, included when enabled), legacy-config
+backward compatibility, and explicit composition with `--denoise-stem`.
+
+## CLI-wiring smoke check (not real training; deleted afterward)
+
+`--rdb-block --rdb-growth-rate 4 --rdb-num-layers 2`, 1 epoch, 8 train / 4
+val samples, 8-feature/2-block model (2,684 total params at this tiny
+capacity): ran to completion, then a second run with `--resume
+checkpoint_latest.pt --epochs 2` correctly resumed at epoch 2 and completed.
+Checkpoint directory deleted after verification.
+
+## Proposed command
+
+```bash
+python train.py --model residual_sr --rdb-block --rdb-growth-rate 16 --rdb-num-layers 3 \
+  --num-features 64 --num-blocks 8 --loss l1 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/exp30_rdb_block
+```
+
+## Result
+
+**TBD.** No real training run has been started.
+
+---
+
+# Ensemble Tooling Extensions — Phase 7/8 (infrastructure, not a new experiment)
+
+## Status
+
+**COMPLETE (tooling only; no new training).** `evaluate_ensemble.py` extended
+to support Phase 7 (prediction averaging across more than two checkpoints)
+and Phase 8 (alpha grid search with an explicit accept/reject rule),
+inference-only.
+
+## What's new
+
+1. **`--checkpoints ckpt1 ckpt2 [ckpt3 ...]` / `--weights w1 w2 [...]`** --
+   generalizes the ensemble evaluator beyond exactly two checkpoints (e.g.
+   several epochs of the *same* run for Phase 7 prediction averaging, or more
+   than two competitive models). The original `--checkpoint-a`/
+   `--checkpoint-b`/`--weight-a`/`--weight-b` two-checkpoint interface is
+   kept byte-for-byte unchanged (Experiments 11/18 used it, as does
+   `tests/test_ensemble_unit.py`); `_resolve_checkpoints_and_weights` merges
+   whichever interface was used into one internal list.
+2. **`validate_ensemble_n`** (new) -- the general N-model (N >= 2) version;
+   `validate_ensemble` (the original two-model function, unchanged
+   signature) now delegates to a shared private helper so both stay
+   consistent without duplicating the aggregation loop.
+3. **`--alpha-search` (`--alpha-step`, default `0.05`)** -- sweeps
+   `prediction = alpha*A + (1-alpha)*B` over `0.0, 0.05, ..., 1.0` for the
+   first two checkpoints, reports each raw model's own PSNR/SSIM, the best
+   alpha, and an explicit **ACCEPTED/REJECTED** verdict (rejects unless the
+   best ensemble PSNR strictly beats the stronger individual model -- the
+   project's existing ensemble acceptance rule, previously applied manually
+   in Experiments 11/18's write-ups, now automated). The pure-model
+   endpoints (`alpha=0.0`/`1.0`) reuse the already-computed raw single-model
+   metrics rather than passing a zero weight through
+   `weighted_average_predictions` (which requires strictly positive weights
+   by design -- `src/ensemble.py`).
+4. **`evaluate_checkpoint.py --raw-weights`** (Phase 7: "raw model and EMA
+   model must be distinguishable") -- the CLI previously had no way to
+   request the live/raw weights instead of EMA; `load_model`'s
+   `prefer_ema=False` path existed but was unreachable from the command
+   line. Now exposed, and every run explicitly prints
+   `Weights evaluated: EMA` / `raw/live` / `raw/live (checkpoint has no EMA
+   weights)` so no report can be ambiguous about which weights were scored.
+
+## Tests
+
+11 new tests: `tests/test_ensemble_unit.py` (N-way matches the two-model
+result exactly for N=2, 3-model support, rejection of a single model,
+`alpha_grid` boundary/validation, `run_alpha_search` structure/best-alpha
+selection, `alpha=1.0` reproducing raw model A exactly, and rejection when
+both models are identical -- the ensemble can never strictly beat either),
+`tests/test_evaluate_checkpoint_unit.py` (`--raw-weights` CLI flag exists).
+Full fast suite: **685 passed, 8 deselected** (up from 617 before this
+update).
+
+## Real-checkpoint smoke check (not a real ablation; inference-only, no
+training)
+
+```bash
+python evaluate_ensemble.py --checkpoints checkpoints/exp23_ema_extended90/checkpoint_best.pt \
+  checkpoints/exp26_finetune_mixed/checkpoint_best.pt --alpha-search --alpha-step 0.25 \
+  --max-val-samples 32
+```
+
+On this 32-sample subset the champion (Model A) alone was best at every
+tested alpha (`alpha=1.00 -> 26.8391 dB`, `+0.0000 dB` over itself,
+**REJECTED**) -- expected, since exp26_finetune_mixed already trails the
+champion on the full validation set (see Experiment 26 above). This is a
+CLI-wiring smoke check on a small subset, not a real ensemble evaluation;
+a real comparison should use the full 640-image validation split.
+
+---
+
 # Official Test-Set Inference Sanity Check (infrastructure, not a new experiment)
 
 After independently verifying Experiment 6, a small inference sanity check was run
@@ -4176,7 +4796,16 @@ above, which remains the only quantitative comparison in this log.
 | Exp 22 — Degradation forensics | **Analysis only**, no training: characterizes GT -> NoisyLR | n/a | n/a | Complete |
 | Exp 23 — EMA extended to 90 epochs | Continuation of Exp 21 | 27.9893 | 0.756916 | Complete |
 | **Exp 23 + x8 TTA** | Inference-only self-ensemble on Exp 23 checkpoint | **28.0355 dB** | **0.758519** | **Current champion** |
-| Exp 24 — Synthetic noise augmentation | 50% signal-dependent synthetic noisy-LR training inputs | TBD | TBD | Planned / prepared |
+| Exp 24 — Synthetic noise augmentation | 50% signal-dependent synthetic noisy-LR training inputs | 27.9116 dB | 0.749092 | Complete (rejected) |
+| Exp 25 — Noise-conditioned ResidualSR | Extra sigma(I) input channel from the Exp 22 noise model | TBD | TBD | Planned / prepared |
+| Exp 26B — MSE fine-tune from champion | `--finetune-from` Exp 23, `--loss mse`, 8 epochs | 27.8966 dB | 0.754295 | Complete (rejected) |
+| Exp 26C — Mixed L1+MSE fine-tune | `--finetune-from` Exp 23, `--loss mixed`, 23 epochs | 27.9527 dB | 0.756677 | Complete (rejected) |
+| Exp 26C + x8 TTA | Inference-only self-ensemble on Exp 26C checkpoint | 28.0027 dB | 0.758374 | Complete (rejected) |
+| Exp 26G — Channel attention | Stray/incomplete artifact on disk (10/90 epochs, wrong crop) | n/a | n/a | **Invalid -- not a real result; see caveat above** |
+| Exp 27 — Variance-weighted L1 loss | `weight = 1/sqrt(var(I))` from the Exp 22 fit | TBD | TBD | Planned / prepared |
+| Exp 28 — Hard-patch sampling | Gradient-energy-weighted crop-origin sampling, 50/50 mixture | TBD | TBD | Planned / prepared |
+| Exp 29 — Denoise stem | Pre-trunk `Conv->gated blocks->Conv` residual denoising stage | TBD | TBD | Planned / prepared |
+| Exp 30 — Lightweight RDB | Dense-feature-reuse residual block (374,596 params, -40.6%) | TBD | TBD | Planned / prepared |
 
 Note: Exp 10 is not a trained model -- it is Experiment 6's checkpoint evaluated with
 x8 test-time augmentation (+0.0599 dB / +0.002321 SSIM over Exp 6 alone). It is an
@@ -4243,6 +4872,120 @@ negative result -- stopped at a 15-epoch screening budget after underperforming
 Experiment 6 by -0.4931 dB PSNR / -0.018161 SSIM with early signs of plateauing;
 **L1 remains the preferred reconstruction loss**. The next research direction is
 architecture improvement, not another loss substitution.
+
+---
+
+# Next-Experiment Priority Order (A–I)
+
+Consolidated, reproducible commands in the priority order requested for this
+round of work. None have been run as full training jobs (GPU time is
+limited and long training is not started automatically); each is
+independently selectable and compares against the protected champion
+(Experiment 23 + x8 TTA: **28.0355 dB / 0.758519 / 0.032264**).
+
+**A — Champion + channel attention only.** The `checkpoints/exp27_channel_attention/`
+artifact on disk is invalid (10/90 epochs, wrong crop -- see the Experiment 26
+caveats above); this is the correct command to actually run:
+```bash
+python train.py --model residual_sr --channel-attention --attention-reduction 8 \
+  --num-features 64 --num-blocks 8 --loss l1 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/expA_channel_attention
+```
+
+**B — Champion + crop 96 only.** Already the champion's own training crop
+(established at Experiment 6, carried through every EMA continuation to
+Experiment 23) -- this is a no-op relative to the champion, not a new run.
+
+**C — Champion + crop 128 (full LR image) only.** Already answered at the
+*pre-EMA* recipe by Experiment 7 (27.7101 dB, a negligible +0.0011 dB over
+the then-champion, with worse SSIM/L1 and slower epochs -- **not** repeated
+at the current 90-epoch EMA recipe). Low priority to redo given that history,
+but the command for completeness:
+```bash
+python train.py --model residual_sr --crop-size 128 \
+  --num-features 64 --num-blocks 8 --loss l1 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/expC_crop128_ema
+```
+
+**D — Champion + multi-scale block only.**
+```bash
+python train.py --model residual_sr --multiscale-block \
+  --num-features 64 --num-blocks 8 --loss l1 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/expD_multiscale_block
+```
+
+**E — Champion + hard-patch sampling only** (Experiment 28 above):
+```bash
+python train.py --model residual_sr --hard-patch-sampling --hard-patch-prob 0.5 \
+  --num-features 64 --num-blocks 8 --loss l1 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/expE_hard_patch
+```
+
+**F — Best of A–E + variance-weighted L1 (Experiment 27 above), applied to
+the winning architecture from A–E once known.** Deliberately not Charbonnier
+again (Experiment 4, rejected) and not another mixed-loss fine-tune
+(Experiment 26B/C, both rejected) -- those were explicitly ruled out by the
+"do not repeat the same experiment" instruction. Template (substitute the
+winning A–E flags in place of the placeholder architecture line):
+```bash
+python train.py --model residual_sr [<winning A-E flag(s)>] \
+  --loss weighted_l1 --num-features 64 --num-blocks 8 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/expF_best_plus_weighted_l1
+```
+
+**G — Degradation-aware denoising stem, only if forensics support it.**
+Forensics do support it (Experiment 29 above: strong signal-dependent noise,
+negligible blur, no fixed pattern):
+```bash
+python train.py --model residual_sr --denoise-stem --denoise-stem-blocks 2 \
+  --num-features 64 --num-blocks 8 --loss l1 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/expG_denoise_stem
+```
+Also still outstanding from before this round: **Experiment 25 (noise
+conditioning)** is fully prepared but has never been run --
+```bash
+python train.py --model residual_sr --num-features 64 --num-blocks 8 \
+  --loss l1 --crop-size 96 --batch-size 16 --seed 42 --lr 1e-4 \
+  --scheduler plateau --scheduler-factor 0.5 --scheduler-patience 3 --min-lr 1e-6 \
+  --ema --ema-decay 0.999 --noise-conditioning \
+  --epochs 90 --checkpoint-dir checkpoints/exp25_noise_conditioned
+```
+
+**H — Best model (from A–G) + x8 TTA.**
+```bash
+python evaluate_checkpoint.py --checkpoint <best_dir>/checkpoint_best.pt --tta x8
+```
+
+**I — Prediction averaging / ensemble of the strongest 2+ candidates from
+A–H** (Experiment "Ensemble Tooling Extensions" above):
+```bash
+python evaluate_ensemble.py --checkpoints <best_dir>/checkpoint_best.pt \
+  checkpoints/exp23_ema_extended90/checkpoint_best.pt --alpha-search --tta x8
+```
+Reject unless the best alpha strictly beats the stronger of the two
+individual models (automated by `--alpha-search`'s printed verdict).
+
+**Also outstanding, lower priority than A–I but prepared:** Experiment 30
+(lightweight RDB block, 374,596 params, -40.6% vs. baseline) --
+```bash
+python train.py --model residual_sr --rdb-block --rdb-growth-rate 16 --rdb-num-layers 3 \
+  --num-features 64 --num-blocks 8 --loss l1 --crop-size 96 --batch-size 16 \
+  --seed 42 --lr 1e-4 --scheduler plateau --scheduler-factor 0.5 \
+  --scheduler-patience 3 --min-lr 1e-6 --ema --ema-decay 0.999 \
+  --epochs 90 --checkpoint-dir checkpoints/exp30_rdb_block
+```
 
 ---
 

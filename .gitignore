@@ -22,6 +22,12 @@ checkpoints/
 *.pth
 *.ckpt
 
+# Submission-required inference-only weight artifact: exempt from the blanket
+# *.pt rule above (which is intended for bulky training checkpoints, not the
+# small packaged file evaluators need). See export_final_weights.py.
+!weights/
+!weights/*.pt
+
 runs/
 wandb/
 

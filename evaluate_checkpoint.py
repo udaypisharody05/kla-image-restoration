@@ -19,6 +19,7 @@ import torch
 from torch import nn
 
 from inspect_dataset import configured_data_dir
+from src.baseline import LPIPSMetric, LPIPSUnavailableError
 from src.dataset import PairedRestorationDataset, create_dataloader
 from src.dataset_discovery import discover_layout, discover_pairs
 from src.losses import loss_label
@@ -63,6 +64,37 @@ def validate_x8(
         "psnr": total_psnr / total_count,
         "ssim": total_ssim / total_count,
     }
+
+
+@torch.no_grad()
+def compute_lpips(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    lpips_metric: LPIPSMetric,
+    tta: str = "none",
+) -> float:
+    """Mean LPIPS over *loader*, on the same validation set/predictions PSNR/SSIM
+    already scored -- a deliberately separate pass (not fused into
+    ``train.validate``/``validate_x8``) so LPIPS is strictly additive and can
+    never change existing PSNR/SSIM/L1 numbers or aggregation. Predictions are
+    unclipped/raw exactly like the PSNR/SSIM path; ``LPIPSMetric`` clips
+    internally (see ``src.baseline.metric_arrays``), matching the project's
+    established "clip only at metric time" convention.
+    """
+    model.eval()
+    total_lpips = 0.0
+    total_count = 0
+    for batch in loader:
+        inputs = batch["input"].to(device)
+        targets = batch["target"].to(device)
+        outputs = predict_x8(model, inputs) if tta == "x8" else model(inputs)
+        outputs_np = outputs.detach().cpu().numpy()
+        targets_np = targets.detach().cpu().numpy()
+        for index in range(outputs_np.shape[0]):
+            total_lpips += lpips_metric(outputs_np[index, 0], targets_np[index, 0])
+            total_count += 1
+    return total_lpips / total_count
 
 
 def load_model(
@@ -123,12 +155,39 @@ def main() -> None:
         default="none",
         help="Test-time augmentation. 'none' (default) is byte-for-byte the original evaluation.",
     )
+    parser.add_argument(
+        "--lpips",
+        action="store_true",
+        help=(
+            "Attempt optional LPIPS evaluation (requires the 'lpips' package and its "
+            "pretrained weights). Runs as a separate pass and never changes the "
+            "PSNR/SSIM/L1 numbers above. Reported as 'unavailable' rather than failing "
+            "the run if the optional dependency/weights are missing."
+        ),
+    )
+    parser.add_argument(
+        "--raw-weights",
+        action="store_true",
+        help=(
+            "Force loading the live/raw model_state_dict even if the checkpoint has EMA "
+            "weights (default: prefer EMA weights when present, matching what training's "
+            "own validation scored). Lets the EMA vs. raw comparison be made explicit and "
+            "unambiguous instead of only ever seeing whichever the checkpoint happens to "
+            "prefer by default."
+        ),
+    )
     args = parser.parse_args()
 
     device = select_device(args.device)
     print(f"Using device: {device}")
 
-    model, checkpoint = load_model(args.checkpoint, device)
+    model, checkpoint = load_model(args.checkpoint, device, prefer_ema=not args.raw_weights)
+    has_ema = checkpoint.get("ema_state_dict") is not None
+    if has_ema:
+        weights_used = "raw/live" if args.raw_weights else "EMA"
+    else:
+        weights_used = "raw/live (checkpoint has no EMA weights)"
+    print(f"Weights evaluated: {weights_used}")
     print(
         f"Loaded checkpoint {args.checkpoint} (epoch={checkpoint.get('epoch')}, "
         f"best_val_psnr={checkpoint.get('best_val_psnr')})"
@@ -174,6 +233,15 @@ def main() -> None:
     ssim_delta = metrics["ssim"] - BICUBIC_SSIM
     print(f"PSNR vs bicubic: {psnr_delta:+.4f} dB")
     print(f"SSIM vs bicubic: {ssim_delta:+.6f}")
+
+    if args.lpips:
+        try:
+            lpips_metric = LPIPSMetric()
+        except LPIPSUnavailableError as exc:
+            print(f"LPIPS: unavailable ({exc})")
+        else:
+            lpips_value = compute_lpips(model, validation_loader, device, lpips_metric, tta=args.tta)
+            print(f"Val LPIPS (lower is better): {lpips_value:.6f}")
 
 
 if __name__ == "__main__":

@@ -98,6 +98,34 @@ def structural_similarity_index(
     )
 
 
+def lpips_input_tensor(array: np.ndarray, torch_module: Any) -> Any:
+    """Convert one ``[H,W]`` grayscale array (expected range ``[0,1]``) into
+    the ``[1,3,H,W]``, ``[-1,1]``-range tensor the LPIPS network expects.
+
+    Two isolated, independently testable transformations, applied in order:
+
+    1. **Grayscale -> RGB**: LPIPS's pretrained backbones (AlexNet/VGG/SqueezeNet)
+       all expect 3-channel input. The single grayscale channel is replicated
+       across all 3 channels (``np.repeat``) rather than converted through any
+       colorspace transform -- there is no color information to recover, so
+       replication is the standard, information-preserving choice for
+       single-channel LPIPS evaluation.
+    2. **Range conversion**: LPIPS expects inputs in ``[-1,1]`` (its published
+       reference implementation's convention), not the ``[0,1]`` range this
+       project's PSNR/SSIM/model I/O uses elsewhere -- ``value * 2.0 - 1.0``
+       maps ``[0,1] -> [-1,1]`` exactly (0.0 -> -1.0, 1.0 -> 1.0).
+
+    Input is clipped to ``[0,1]`` first (matching ``metric_arrays``'s
+    prediction-clipping convention) so a raw, potentially out-of-range model
+    output cannot silently map outside LPIPS's expected ``[-1,1]`` domain.
+    """
+    if array.ndim != 2:
+        raise ValueError(f"Expected a 2D grayscale array, got shape {array.shape}")
+    clipped = np.clip(array, 0.0, 1.0).astype(np.float32)
+    rgb = np.repeat(clipped[None, None, :, :], 3, axis=1)
+    return torch_module.from_numpy(rgb * 2.0 - 1.0)
+
+
 class LPIPSMetric:
     """Optional LPIPS metric with transformations isolated from raw preprocessing."""
 
@@ -121,14 +149,11 @@ class LPIPSMetric:
         prediction_array, target_array = metric_arrays(
             prediction, target, clip_prediction=True
         )
-
-        def tensor(array: np.ndarray) -> Any:
-            clipped = np.clip(array, 0.0, 1.0).astype(np.float32)
-            rgb = np.repeat(clipped[None, None, :, :], 3, axis=1)
-            return self._torch.from_numpy(rgb * 2.0 - 1.0)
-
         with self._torch.no_grad():
-            value = self._model(tensor(prediction_array), tensor(target_array))
+            value = self._model(
+                lpips_input_tensor(prediction_array, self._torch),
+                lpips_input_tensor(target_array, self._torch),
+            )
         return float(value.item())
 
 
