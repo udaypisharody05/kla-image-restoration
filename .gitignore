@@ -28,6 +28,13 @@ checkpoints/
 !weights/
 !weights/*.pt
 
+# Same exemption for the packaged evaluator submission's copy of the
+# champion weights (submission/<team_name>/models/residualsr_final_ema.pt).
+# Narrowly scoped to that one path shape -- experimental/training
+# checkpoints elsewhere remain ignored.
+!submission/*/models/
+!submission/*/models/*.pt
+
 runs/
 wandb/
 

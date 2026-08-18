@@ -1,0 +1,12 @@
+# Minimal runtime dependencies for `python run.py <input-dir> <output-dir>`.
+# Pinned to the exact versions used to produce the packaged champion weights
+# (models/residualsr_final_ema.pt) and verify this submission package.
+#
+# torch is listed without the local "+cu128" CUDA build suffix -- that
+# suffix only resolves via PyTorch's own package index, not plain PyPI, so
+# `pip install -r requirements.txt` installs the CPU build everywhere
+# (including machines with no GPU). On a CUDA machine, install the matching
+# GPU build instead (see README.md "Installation"); run.py auto-detects and
+# uses CUDA whenever a CUDA-enabled torch build is installed.
+numpy==2.3.5
+torch==2.7.1

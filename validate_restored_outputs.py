@@ -66,6 +66,10 @@ def validate(input_dir: Path, output_dir: Path, scale: int, model: str, tta: str
             problems.append(f"{name}: contains non-finite values")
         if output_array.dtype != np.float32:
             problems.append(f"{name}: dtype {output_array.dtype} != float32")
+        if entry["finite"] and (entry["min"] < 0.0 or entry["max"] > 1.0):
+            problems.append(
+                f"{name}: value range [{entry['min']}, {entry['max']}] outside required [0, 1]"
+            )
 
     manifest = {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
